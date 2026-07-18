@@ -1,0 +1,29 @@
+[package]
+name = "optionfiles"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "optionFiles — minimal terminal file manager"
+authors = ["AEFireflyLabs"]
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["files", "file-manager", "terminal", "tui", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "optionfiles"
+path = "src/main.rs"
+
+[[bin]]
+name = "fls"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "color"] }
+crossterm = "0.28"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
