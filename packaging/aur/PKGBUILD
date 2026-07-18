@@ -11,7 +11,7 @@ makedepends=('cargo')
 optdepends=('imagemagick: previews for JPEG, GIF, WebP, BMP and TIFF')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('f4b79960fb8c9adabe33f8f2fadaaf0f60a8cba272108a137ad48248a92cdccf')
 
 prepare() {
   cd "optionFiles-$pkgver"
