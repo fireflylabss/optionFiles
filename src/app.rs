@@ -19,6 +19,7 @@ pub struct Clipboard {
 
 pub struct App {
     pub cwd: PathBuf,
+    pub previous_dir: Option<PathBuf>,
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub scroll: usize,
@@ -28,6 +29,7 @@ pub struct App {
     pub status: String,
     pub help: bool,
     pub preview: bool,
+    pub filter: String,
 }
 
 impl App {
@@ -39,6 +41,7 @@ impl App {
         };
         let mut app = Self {
             cwd,
+            previous_dir: None,
             entries: vec![],
             selected: 0,
             scroll: 0,
@@ -48,6 +51,7 @@ impl App {
             status: String::new(),
             help: false,
             preview: true,
+            filter: String::new(),
         };
         app.refresh()?;
         if path.is_file() {
@@ -65,6 +69,11 @@ impl App {
     pub fn refresh(&mut self) -> Result<()> {
         let selected = self.current().map(|e| e.name.clone());
         self.entries = read_dir(&self.cwd, self.show_hidden, self.sort)?;
+        if !self.filter.is_empty() {
+            let needle = self.filter.to_lowercase();
+            self.entries
+                .retain(|entry| entry.name.to_lowercase().contains(&needle));
+        }
         self.selected = selected
             .and_then(|n| self.entries.iter().position(|e| e.name == n))
             .unwrap_or(self.selected.min(self.entries.len().saturating_sub(1)));
@@ -93,6 +102,7 @@ impl App {
             return Ok(None);
         };
         if entry.is_dir {
+            self.previous_dir = Some(self.cwd.clone());
             self.cwd = entry.path.canonicalize()?;
             self.selected = 0;
             self.scroll = 0;
@@ -107,6 +117,7 @@ impl App {
         let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
             return Ok(());
         };
+        self.previous_dir = Some(old.clone());
         self.cwd = parent;
         self.selected = 0;
         self.scroll = 0;
@@ -126,6 +137,33 @@ impl App {
     }
     pub fn cycle_sort(&mut self) -> Result<()> {
         self.sort = self.sort.next();
+        self.refresh()
+    }
+    pub fn set_filter(&mut self, filter: String) -> Result<()> {
+        self.filter = filter;
+        self.selected = 0;
+        self.scroll = 0;
+        self.refresh()
+    }
+    pub fn go_home(&mut self) -> Result<()> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .context("HOME is not set")?;
+        self.previous_dir = Some(self.cwd.clone());
+        self.cwd = home.canonicalize()?;
+        self.selected = 0;
+        self.scroll = 0;
+        self.refresh()
+    }
+    pub fn go_previous(&mut self) -> Result<()> {
+        let Some(previous) = self.previous_dir.take() else {
+            self.status = "no previous location".into();
+            return Ok(());
+        };
+        let current = std::mem::replace(&mut self.cwd, previous);
+        self.previous_dir = Some(current);
+        self.selected = 0;
+        self.scroll = 0;
         self.refresh()
     }
     pub fn set_clipboard(&mut self, mode: ClipboardMode) {

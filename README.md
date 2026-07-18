@@ -68,13 +68,16 @@ When standard input or output is not attached to a terminal, `fls` automatically
 | `←` / backspace | Go to parent directory |
 | `g` / `G` | Jump to first / last entry |
 | Page Up / Page Down | Move by ten entries |
-| `a` | Toggle hidden files |
+| `a` / `.` | Toggle hidden files |
 | `s` | Cycle sort (`name` → `size` → `date`) |
 | `space` | Toggle preview panel |
+| `/` / `Ctrl+F` | Search or filter by name |
+| `~` / `-` | Go to home / previous directory |
 | `c` / `x` / `v` | Copy / cut / paste |
 | `n` / `N` | Create directory / file |
-| `r` | Rename selected entry |
-| `d` | Delete with confirmation |
+| `r` / `F2` | Rename selected entry |
+| `d` / `Delete` | Delete with confirmation |
+| `F5` / `Ctrl+R` | Refresh the current directory |
 | `o` | Open with the system application |
 | `?` | Toggle help |
 | `q` / Esc | Quit or close overlay |

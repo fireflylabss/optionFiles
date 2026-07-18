@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -63,6 +63,7 @@ pub enum PromptKind {
     File,
     Rename,
     Delete,
+    Search,
 }
 
 pub struct Prompt {
@@ -77,6 +78,7 @@ impl Prompt {
             PromptKind::File => "new file",
             PromptKind::Rename => "rename",
             PromptKind::Delete => "delete? type y",
+            PromptKind::Search => "filter by name · empty clears",
         }
     }
 }
@@ -212,11 +214,17 @@ fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Res
             )
         })
         .unwrap_or_default();
+    let filter = if app.filter.is_empty() {
+        String::new()
+    } else {
+        format!(" · filter ‘{}’", app.filter)
+    };
     let state = format!(
-        "{} item{} · sort {}{}",
+        "{} item{} · sort {}{}{}",
         app.entries.len(),
         if app.entries.len() == 1 { "" } else { "s" },
         app.sort.label(),
+        filter,
         clip
     );
     let status_width = app.status.chars().count() as u16;
@@ -240,7 +248,7 @@ fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Res
         DIM,
         false,
         &truncate(
-            "↑↓ move   enter open   ← back   c/x/v clipboard   ? help",
+            "↑↓ move   enter open   / search   ~ home   c/x/v clipboard   ? help",
             w.saturating_sub(4) as usize,
         ),
     )?;
@@ -329,6 +337,20 @@ fn draw_preview(
     if !entry.is_dir {
         print_at(out, x, y + 3, WHITE, false, &human_size(entry.size))?;
     }
+    if let Some(lines) = text_preview(&entry.path, terminal_height.saturating_sub(y + 7) as usize) {
+        print_at(out, x, y + 5, DIM, false, "preview")?;
+        for (index, line) in lines.iter().enumerate() {
+            print_at(
+                out,
+                x,
+                y + 6 + index as u16,
+                WHITE,
+                false,
+                &truncate(line, width as usize),
+            )?;
+        }
+        return Ok(());
+    }
     let modified = entry
         .modified
         .and_then(|m| SystemTime::now().duration_since(m).ok())
@@ -350,25 +372,28 @@ fn draw_preview(
 
 fn overlay_help(out: &mut impl Write, w: u16, h: u16) -> Result<()> {
     let width = 48.min(w - 4);
-    let height = 18.min(h - 2);
-    let x = (w - width) / 2;
-    let y = (h - height) / 2;
-    box_fill(out, x, y, width, height)?;
-    print_at(out, x + 2, y + 1, BRIGHT, true, "keyboard")?;
     let rows = [
         "enter / →   open",
         "← / backspace parent",
         "g / G       first / last",
-        "a           hidden files",
+        "a / .       hidden files",
         "s           cycle sort",
         "space       preview",
+        "/ / ctrl+f  search / filter",
+        "~ / -       home / previous",
         "c / x / v   copy / cut / paste",
         "n / N       new folder / file",
-        "r           rename",
-        "d           delete (confirm)",
+        "r / F2      rename",
+        "d / del     delete (confirm)",
+        "F5 / ctrl+r refresh",
         "o           open with system",
         "q / esc     quit / close",
     ];
+    let height = (rows.len() as u16 + 5).min(h - 2);
+    let x = (w - width) / 2;
+    let y = (h - height) / 2;
+    box_fill(out, x, y, width, height)?;
+    print_at(out, x + 2, y + 1, BRIGHT, true, "keyboard")?;
     for (i, row) in rows.iter().enumerate() {
         print_at(
             out,
@@ -381,6 +406,55 @@ fn overlay_help(out: &mut impl Write, w: u16, h: u16) -> Result<()> {
     }
     print_at(out, x + 2, y + height - 2, DIM, false, "? close")?;
     Ok(())
+}
+
+fn text_preview(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "txt"
+            | "md"
+            | "rs"
+            | "toml"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "css"
+            | "html"
+            | "xml"
+            | "sh"
+            | "py"
+            | "go"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "java"
+            | "kt"
+            | "lua"
+            | "ini"
+            | "conf"
+            | "log"
+    ) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(16 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let text = String::from_utf8(bytes).ok()?;
+    Some(
+        text.lines()
+            .take(max_lines.max(1))
+            .map(|line| line.replace('\t', "  "))
+            .collect(),
+    )
 }
 
 fn overlay_prompt(out: &mut impl Write, w: u16, h: u16, prompt: &Prompt) -> Result<()> {

@@ -31,9 +31,38 @@ fn run() -> Result<()> {
     match cli.command {
         Some(Command::List { path }) => list(&path, all),
         Some(Command::Info { path }) => info(&path),
+        Some(Command::Tree { path, depth }) => tree(&path, all, depth),
         Some(Command::Open { path }) => interactive(&path, all),
         None => interactive(cli.path.as_deref().unwrap_or(Path::new(".")), all),
     }
+}
+
+fn tree(path: &Path, all: bool, depth: u8) -> Result<()> {
+    let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    println!("◆ {}", root.display());
+    print_tree(&root, all, depth as usize, "")
+}
+
+fn print_tree(path: &Path, all: bool, depth: usize, prefix: &str) -> Result<()> {
+    if depth == 0 || !path.is_dir() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(path, all, fs::SortMode::Name)?;
+    let len = entries.len();
+    for (index, entry) in entries.into_iter().enumerate() {
+        let last = index + 1 == len;
+        println!(
+            "{prefix}{} {}{}",
+            if last { "└─" } else { "├─" },
+            entry.name,
+            if entry.is_dir { "/" } else { "" }
+        );
+        if entry.is_dir {
+            let next = format!("{prefix}{} ", if last { "  " } else { "│ " });
+            print_tree(&entry.path, all, depth - 1, &next)?;
+        }
+    }
+    Ok(())
 }
 
 fn list(path: &Path, all: bool) -> Result<()> {
@@ -112,6 +141,7 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                                     app.status = "delete cancelled".into();
                                     Ok(())
                                 }
+                                PromptKind::Search => app.set_filter(p.value),
                             };
                             if let Err(e) = result {
                                 app.status = e.to_string();
@@ -139,6 +169,19 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        prompt = Some(Prompt {
+                            kind: PromptKind::Search,
+                            value: app.filter.clone(),
+                        })
+                    }
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Err(e) = app.refresh() {
+                            app.status = e.to_string();
+                        } else {
+                            app.status = "refreshed".into();
+                        }
+                    }
                     KeyCode::Up | KeyCode::Char('k') => app.move_by(-1),
                     KeyCode::Down | KeyCode::Char('j') => app.move_by(1),
                     KeyCode::PageUp => app.move_by(-10),
@@ -160,7 +203,7 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                             open_external(&path, &mut app);
                         }
                     }
-                    KeyCode::Char('a') => {
+                    KeyCode::Char('a') | KeyCode::Char('.') => {
                         if let Err(e) = app.toggle_hidden() {
                             app.status = e.to_string();
                         }
@@ -171,6 +214,22 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                         }
                     }
                     KeyCode::Char(' ') => app.preview = !app.preview,
+                    KeyCode::Char('/') => {
+                        prompt = Some(Prompt {
+                            kind: PromptKind::Search,
+                            value: app.filter.clone(),
+                        })
+                    }
+                    KeyCode::Char('~') => {
+                        if let Err(e) = app.go_home() {
+                            app.status = e.to_string();
+                        }
+                    }
+                    KeyCode::Char('-') => {
+                        if let Err(e) = app.go_previous() {
+                            app.status = e.to_string();
+                        }
+                    }
                     KeyCode::Char('?') => app.help = true,
                     KeyCode::Char('c') => app.set_clipboard(ClipboardMode::Copy),
                     KeyCode::Char('x') => app.set_clipboard(ClipboardMode::Cut),
@@ -191,7 +250,7 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                             value: String::new(),
                         })
                     }
-                    KeyCode::Char('r') => {
+                    KeyCode::Char('r') | KeyCode::F(2) => {
                         if let Some(name) = app.current().map(|e| e.name.clone()) {
                             prompt = Some(Prompt {
                                 kind: PromptKind::Rename,
@@ -199,11 +258,18 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                             });
                         }
                     }
-                    KeyCode::Char('d') => {
+                    KeyCode::Char('d') | KeyCode::Delete => {
                         prompt = Some(Prompt {
                             kind: PromptKind::Delete,
                             value: String::new(),
                         })
+                    }
+                    KeyCode::F(5) => {
+                        if let Err(e) = app.refresh() {
+                            app.status = e.to_string();
+                        } else {
+                            app.status = "refreshed".into();
+                        }
                     }
                     _ => {}
                 }

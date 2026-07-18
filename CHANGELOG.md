@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Familiar keyboard aliases: `Delete` for deletion, `F2` for rename, `F5` or `Ctrl+R` for refresh, `Ctrl+F` for search and `.` for hidden files.
+- Name filtering, home and previous-directory shortcuts, text previews and the `tree` CLI command.
 - Initial release of **optionFiles** (*option files*).
 - Dual binaries: `optionfiles` and short alias `fls`.
 - Interactive alternate-screen terminal file manager.

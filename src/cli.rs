@@ -54,4 +54,14 @@ pub enum Command {
     /// Show file or directory information
     #[command(visible_alias = "i")]
     Info { path: PathBuf },
+    /// Print a directory tree
+    #[command(visible_alias = "t")]
+    Tree {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Maximum directory depth
+        #[arg(short, long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=20))]
+        depth: u8,
+    },
 }
