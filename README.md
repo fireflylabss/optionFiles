@@ -20,6 +20,14 @@ location  /home/firefly/Projects
 
 ## Install
 
+### Arch / CachyOS (AUR)
+
+```bash
+yay -S optionfiles
+# or
+paru -S optionfiles
+```
+
 ### Build from source
 
 Requires Rust **1.85+**.
@@ -44,6 +52,7 @@ fls -a ~/.config
 fls open ~/Pictures
 fls list ~/Projects
 fls info archive.zip
+fls tree ~/Projects --depth 2
 fls --help
 ```
 
@@ -55,6 +64,7 @@ fls --help
 | `fls open PATH` | Open a path interactively |
 | `fls list PATH` | Print a plain directory listing |
 | `fls info PATH` | Print file or directory information |
+| `fls tree PATH` | Print a directory tree (`--depth`, default 3) |
 | `fls -a PATH` | Start with hidden files visible |
 
 When standard input or output is not attached to a terminal, `fls` automatically prints a plain listing instead of entering the TUI.
@@ -71,6 +81,8 @@ When standard input or output is not attached to a terminal, `fls` automatically
 | `a` / `.` | Toggle hidden files |
 | `s` | Cycle sort (`name` → `size` → `date`) |
 | `space` | Toggle preview panel |
+| `/` | Filter entries by name; submit empty to clear |
+| `~` / `-` | Go home / return to previous location |
 | `/` / `Ctrl+F` | Search or filter by name |
 | `~` / `-` | Go to home / previous directory |
 | `c` / `x` / `v` | Copy / cut / paste |
@@ -124,6 +136,8 @@ sudo dnf install ImageMagick
 - Files and directories always grouped predictably
 - Name, size and modification-date sorting
 - Hidden-file toggle
+- Fast case-insensitive name filtering
+- Home and previous-location navigation
 - Copy, cut and paste with collision-safe names
 - Create files and directories
 - Rename and confirmed deletion
@@ -132,6 +146,8 @@ sudo dnf install ImageMagick
 - Flicker-free synchronized terminal frames
 - Keyboard and mouse controls
 - Kitty Graphics Protocol image previews
+- Text and source-code previews with bounded reads
+- Recursive `tree` command with configurable depth
 - Plain non-interactive `list` and `info` commands
 
 ## Philosophy

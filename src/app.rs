@@ -299,4 +299,18 @@ mod tests {
         assert!(root.join("notes copy 1.txt").exists());
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn filters_entries_and_restores_full_directory() {
+        let root = sandbox();
+        fs::write(root.join("alpha.txt"), "a").unwrap();
+        fs::write(root.join("beta.txt"), "b").unwrap();
+        let mut app = App::new(&root, false).unwrap();
+        app.set_filter("ALP".into()).unwrap();
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].name, "alpha.txt");
+        app.set_filter(String::new()).unwrap();
+        assert_eq!(app.entries.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

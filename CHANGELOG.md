@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-18
+
+### Added
+
+- Case-insensitive file filtering with `/`; submitting an empty filter restores the full directory.
+- Home navigation with `~` and previous-location toggle with `-`.
+- Bounded text and source-code previews for common human-readable formats.
+- `tree` / `t` CLI command with configurable recursion depth.
+- AUR packaging for `optionfiles` with optional ImageMagick integration.
+- GitHub Release workflow that automatically updates and publishes the AUR package.
+
+### Changed
+
+- Preview panel now chooses between Kitty graphics, source text and file metadata.
+- Version bumped to 0.2.0.
+
 ## [0.1.0] - 2026-07-18
 
 ### Added
@@ -33,3 +49,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Unit tests covering file operations, sizes, sorting, image detection and Base64 encoding.
 
 [0.1.0]: https://github.com/fireflylabss/optionFiles/releases/tag/v0.1.0
+[0.2.0]: https://github.com/fireflylabss/optionFiles/compare/v0.1.0...v0.2.0
