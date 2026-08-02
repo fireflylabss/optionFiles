@@ -93,8 +93,13 @@ fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Res
         cursor::MoveTo(0, 0),
         Clear(ClearType::All)
     )?;
+    let title = format!(
+        "{} {}",
+        option_sdk::App::FILES.mark(),
+        option_sdk::App::FILES.display_name()
+    );
     if w < 54 || h < 12 {
-        print_at(&mut out, 2, 2, BRIGHT, true, "◆ optionFiles")?;
+        print_at(&mut out, 2, 2, BRIGHT, true, &title)?;
         print_at(
             &mut out,
             2,
@@ -119,7 +124,7 @@ fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Res
         app.scroll = app.selected + 1 - rows;
     }
 
-    print_at(&mut out, margin, 1, BRIGHT, true, "◆ optionFiles")?;
+    print_at(&mut out, margin, 1, BRIGHT, true, &title)?;
     print_right(&mut out, w - margin, 1, DIM, "local · files")?;
     print_at(&mut out, margin, 2, DIM, false, "location")?;
     let path = compact_path(&app.cwd, w.saturating_sub(15) as usize);

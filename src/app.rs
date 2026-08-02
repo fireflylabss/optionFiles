@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::fs::{Entry, SortMode, copy_recursively, read_dir};
 
@@ -146,11 +146,11 @@ impl App {
         self.refresh()
     }
     pub fn go_home(&mut self) -> Result<()> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set")?;
+        let home = option_sdk::home_dir();
         self.previous_dir = Some(self.cwd.clone());
-        self.cwd = home.canonicalize()?;
+        self.cwd = home
+            .canonicalize()
+            .with_context(|| format!("cannot open home {}", home.display()))?;
         self.selected = 0;
         self.scroll = 0;
         self.refresh()
@@ -210,11 +210,13 @@ impl App {
         self.refresh()
     }
     pub fn create_dir(&mut self, name: &str) -> Result<()> {
+        validate_entry_name(name)?;
         fs::create_dir(self.cwd.join(name))?;
         self.status = format!("created {name}/");
         self.refresh()
     }
     pub fn create_file(&mut self, name: &str) -> Result<()> {
+        validate_entry_name(name)?;
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -223,6 +225,7 @@ impl App {
         self.refresh()
     }
     pub fn rename_current(&mut self, name: &str) -> Result<()> {
+        validate_entry_name(name)?;
         let current = self.current().context("nothing selected")?.path.clone();
         fs::rename(&current, self.cwd.join(name))?;
         self.status = format!("renamed to {name}");
@@ -234,6 +237,34 @@ impl App {
         self.status = format!("deleted {}", entry.name);
         self.refresh()
     }
+}
+
+fn validate_entry_name(name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("name is empty");
+    }
+    if name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        bail!("name must be a single path segment");
+    }
+    let path = Path::new(name);
+    if path.is_absolute() {
+        bail!("name must be a single path segment");
+    }
+    let mut components = path.components();
+    match components.next() {
+        Some(std::path::Component::Normal(_)) => {}
+        _ => bail!("name must be a single path segment"),
+    }
+    if components.next().is_some() {
+        bail!("name must be a single path segment");
+    }
+    Ok(())
 }
 
 fn remove_path(path: &Path) -> Result<()> {
@@ -311,6 +342,36 @@ mod tests {
         assert_eq!(app.entries[0].name, "alpha.txt");
         app.set_filter(String::new()).unwrap();
         assert_eq!(app.entries.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_parent_dir_names() {
+        let root = sandbox();
+        let mut app = App::new(&root, false).unwrap();
+        assert!(app.create_file("../escape.txt").is_err());
+        assert!(app.create_dir("..").is_err());
+        assert!(!root.join("escape.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_nested_relative_names() {
+        let root = sandbox();
+        let mut app = App::new(&root, false).unwrap();
+        assert!(app.create_file("a/b.txt").is_err());
+        assert!(app.create_dir("nested/dir").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_escape_on_rename() {
+        let root = sandbox();
+        let mut app = App::new(&root, false).unwrap();
+        app.create_file("ok.txt").unwrap();
+        app.selected = app.entries.iter().position(|e| e.name == "ok.txt").unwrap();
+        assert!(app.rename_current("../x").is_err());
+        assert!(root.join("ok.txt").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

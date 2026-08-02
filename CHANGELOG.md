@@ -1,8 +1,31 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+We follow [Semantic Versioning](https://semver.org/) and [Keep a Changelog](https://keepachangelog.com/). optionFiles is a single CLI surface.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+<details>
+<summary>To see more about versioning, expand this.</summary>
+
+Every version string starts with `v` (required), e.g. `v0.2.1`, `v0.2.0`.
+
+Here the installable surface is **CLI** (`optionfiles` / `fls`).
+
+| Part | What you install | Example |
+| --- | --- | --- |
+| **CLI** | `optionfiles` / `fls` in the terminal | `v0.2.1` |
+
+With one surface there is no `m` in the tag and no per-surface sections — just the version notes.
+
+Each release heading is the version and date; under it, a short summary ends with a plain sentence naming the surface and tag.
+
+</details>
+
+## v0.2.1 · 02/08/2026
+
+optionSDK integration and safer create/rename names. This version was made for CLI on 02/08/2026 (v0.2.1).
+
+- Depend on published **optionSDK** 0.1.2 for marks, display name, home path, and `App::FILES.ensure()`.
+- Reject `..`, absolute paths, and multi-segment names in create/rename so prompts cannot escape the current directory.
+- Various other small tweaks
 
 ## [0.2.0] - 2026-07-18
 

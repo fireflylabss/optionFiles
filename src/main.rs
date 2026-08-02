@@ -26,6 +26,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    let _ = option_sdk::App::FILES.ensure();
     let cli = Cli::parse();
     let all = cli.all;
     match cli.command {
@@ -39,7 +40,7 @@ fn run() -> Result<()> {
 
 fn tree(path: &Path, all: bool, depth: u8) -> Result<()> {
     let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    println!("◆ {}", root.display());
+    println!("{} {}", option_sdk::App::FILES.mark(), root.display());
     print_tree(&root, all, depth as usize, "")
 }
 
@@ -83,7 +84,7 @@ fn list(path: &Path, all: bool) -> Result<()> {
 
 fn info(path: &Path) -> Result<()> {
     let entry = fs::Entry::load(path.to_path_buf())?;
-    println!("◆ {}", entry.name);
+    println!("{} {}", option_sdk::App::FILES.mark(), entry.name);
     println!(
         "  type      {}",
         if entry.is_dir {
