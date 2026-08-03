@@ -26,7 +26,9 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let _ = option_sdk::App::FILES.ensure();
+    option_sdk::App::FILES
+        .ensure()
+        .context("failed to ensure ~/.option/files")?;
     let cli = Cli::parse();
     let all = cli.all;
     match cli.command {

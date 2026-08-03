@@ -5,19 +5,26 @@ We follow [Semantic Versioning](https://semver.org/) and [Keep a Changelog](http
 <details>
 <summary>To see more about versioning, expand this.</summary>
 
-Every version string starts with `v` (required), e.g. `v0.2.1`, `v0.2.0`.
+Every version string starts with `v` (required), e.g. `v0.2.2-stable`, `v0.2.1`.
 
 Here the installable surface is **CLI** (`optionfiles` / `fls`).
 
 | Part | What you install | Example |
 | --- | --- | --- |
-| **CLI** | `optionfiles` / `fls` in the terminal | `v0.2.1` |
+| **CLI** | `optionfiles` / `fls` in the terminal | `v0.2.2-stable` |
 
 With one surface there is no `m` in the tag and no per-surface sections — just the version notes.
 
 Each release heading is the version and date; under it, a short summary ends with a plain sentence naming the surface and tag.
 
 </details>
+
+## v0.2.2-stable · 03/08/2026
+
+Shared SDK error handling and release-ready persistence contract. This version was made for CLI with a stable release channel on 03/08/2026 (v0.2.2-stable).
+
+- Adopt `optionSDK` 0.1.3 with the shared atomic-write and identity helpers.
+- Surface failures while preparing `~/.option/files` instead of continuing with an unverified state directory.
 
 ## v0.2.1 · 02/08/2026
 
