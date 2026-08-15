@@ -85,12 +85,13 @@ When standard input or output is not attached to a terminal, `fls` automatically
 | `~` / `-` | Go home / return to previous location |
 | `/` / `Ctrl+F` | Search or filter by name |
 | `~` / `-` | Go to home / previous directory |
-| `c` / `x` / `v` | Copy / cut / paste |
+| `c` / `x` / `v` | Copy / cut / paste (system clipboard when available) |
 | `n` / `N` | Create directory / file |
 | `r` / `F2` | Rename selected entry |
-| `d` / `Delete` | Delete with confirmation |
-| `F5` / `Ctrl+R` | Refresh the current directory |
+| `d` / `Delete` | Move to trash with confirmation |
+| `e` | Edit with `$EDITOR` |
 | `o` | Open with the system application |
+| `F5` / `Ctrl+R` | Refresh the current directory |
 | `?` | Toggle help |
 | `q` / Esc | Quit or close overlay |
 
@@ -100,6 +101,12 @@ When standard input or output is not attached to a terminal, `fls` automatically
 |---|---|
 | Click row | Select entry |
 | Scroll wheel | Move selection by three entries |
+
+### Search & delete
+
+- `/` or `Ctrl+F` filters by name. A single word matches as a substring; a multi-word query (e.g. `src main`) or scattered letters (e.g. `draftxt`) rank fuzzy subsequence matches.
+- `d` / `Delete` moves the selection to the trash. A system helper (`gio trash` / `trash`) is preferred; otherwise optionFiles writes to the XDG trash under `~/.local/share/Trash`.
+- `c` / `x` / `v` share the system clipboard when `wl-copy` / `xclip` / `pbcopy` are present, and fall back to the internal clipboard otherwise.
 
 ## Image previews
 
@@ -136,16 +143,17 @@ sudo dnf install ImageMagick
 - Files and directories always grouped predictably
 - Name, size and modification-date sorting
 - Hidden-file toggle
-- Fast case-insensitive name filtering
+- Fast case-insensitive name filtering with fuzzy ranking
 - Home and previous-location navigation
 - Copy, cut and paste with collision-safe names
+- System clipboard integration (`wl-copy` / `xclip` / `pbcopy`) with internal fallback
 - Create files and directories
-- Rename and confirmed deletion
-- System application integration through `xdg-open` / `open`
+- Rename and trash (recoverable deletion) with XDG trash fallback
+- Edit files with `$EDITOR` and open with the system application
 - Responsive black & white alternate-screen UI
 - Flicker-free synchronized terminal frames
 - Keyboard and mouse controls
-- Kitty Graphics Protocol image previews
+- Kitty Graphics Protocol image previews with frame caching
 - Text and source-code previews with bounded reads
 - Recursive `tree` command with configurable depth
 - Plain non-interactive `list` and `info` commands

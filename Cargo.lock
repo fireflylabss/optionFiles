@@ -240,13 +240,15 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "optionSDK"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0a6065fe92ebbfd99b7f0ba2aed5d7fb076a660caf755fb3583cc6db5d5dd09"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "optionfiles"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",

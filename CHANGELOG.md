@@ -19,19 +19,24 @@ Each release heading is the version and date; under it, a short summary ends wit
 
 </details>
 
-## v0.2.3-stable · 14/08/2026
+## v0.2.4-stable · 15/08/2026
 
-Kitty previews inside optionTerm, plus trash, clipboard and richer preview caching. This version was made for CLI with a stable release channel on 14/08/2026 (v0.2.3-stable).
+Trash, clipboard, fuzzy search and wider-column alignment. This version was made for CLI with a stable release channel on 15/08/2026 (v0.2.4-stable).
 
-- Image previews now work inside **optionTerm** too: `TERM_PROGRAM=optionTerm` is detected, and the terminal's patched VTE accepts the file-based transmit (`t=f`) used for previews.
 - Trash deletion: `d` / `Delete` moves the selection to the system trash (`gio trash` / `trash`) with an XDG trash fallback under `~/.local/share/Trash` instead of permanent removal.
 - System clipboard integration: `c` / `x` / `v` use `wl-copy` / `xclip` / `pbcopy` when available and fall back to the internal clipboard.
 - `e` edits the selected file with `$EDITOR` (or `$VISUAL`).
 - Fuzzy search ranking: multi-word or scattered queries on `/` / `Ctrl+F` rank subsequence matches; single words still match as a substring.
 - Richer `fls info`: permissions, owner (uid/gid) and modification date.
 - Middle-ellipsis path display in the location bar, keeping the current directory visible.
-- Image previews are cached: unchanged frames are not resent, and position-only moves reuse the payload to avoid redraw flicker.
 - Text truncation and column alignment are width-aware via `unicode-width`, fixing alignment with CJK and emoji filenames.
+
+## v0.2.3-stable · 14/08/2026
+
+Kitty previews inside optionTerm, with smarter preview caching. This version was made for CLI with a stable release channel on 14/08/2026 (v0.2.3-stable).
+
+- Image previews now work inside **optionTerm** too: `TERM_PROGRAM=optionTerm` is detected, and the terminal's patched VTE accepts the file-based transmit (`t=f`) used for previews.
+- Image previews are cached: unchanged frames are not resent, and position-only moves reuse the payload to avoid redraw flicker.
 
 ## v0.2.2-stable · 03/08/2026
 

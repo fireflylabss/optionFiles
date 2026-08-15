@@ -232,7 +232,7 @@ fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Res
         filter,
         clip
     );
-    let status_width = app.status.chars().count() as u16;
+    let status_width = unicode_width::UnicodeWidthStr::width(app.status.as_str()) as u16;
     let state_width =
         w.saturating_sub(status_width + margin * 2 + if status_width > 0 { 3 } else { 0 });
     print_at(
@@ -253,7 +253,7 @@ fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Res
         DIM,
         false,
         &truncate(
-            "↑↓ move   enter open   / search   ~ home   c/x/v clipboard   ? help",
+            "↑↓ move   enter open   / search   ~ home   e edit   ? help",
             w.saturating_sub(4) as usize,
         ),
     )?;
@@ -284,10 +284,11 @@ fn selected_row(
     label: &str,
     meta: &str,
 ) -> Result<()> {
-    let meta_len = meta.chars().count();
+    let meta_len = unicode_width::UnicodeWidthStr::width(meta);
     let room = width.saturating_sub(meta_len as u16 + 2) as usize;
     let label = truncate(label, room);
-    let gap = width as usize - label.chars().count() - meta_len;
+    let label_len = unicode_width::UnicodeWidthStr::width(label.as_str());
+    let gap = width as usize - label_len - meta_len;
     queue!(
         out,
         cursor::MoveTo(x, y),
@@ -389,9 +390,9 @@ fn overlay_help(out: &mut impl Write, w: u16, h: u16) -> Result<()> {
         "c / x / v   copy / cut / paste",
         "n / N       new folder / file",
         "r / F2      rename",
-        "d / del     delete (confirm)",
+        "d / del     delete (trash)",
+        "e / o       edit / open with",
         "F5 / ctrl+r refresh",
-        "o           open with system",
         "q / esc     quit / close",
     ];
     let height = (rows.len() as u16 + 5).min(h - 2);
@@ -537,20 +538,65 @@ fn print_at(
     Ok(())
 }
 fn print_right(out: &mut impl Write, right: u16, y: u16, color: Color, text: &str) -> Result<()> {
-    let x = right.saturating_sub(text.chars().count() as u16);
+    let x = right.saturating_sub(unicode_width::UnicodeWidthStr::width(text) as u16);
     print_at(out, x, y, color, false, text)
 }
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    let width = unicode_width::UnicodeWidthStr::width(s);
+    if width <= max {
         s.into()
     } else if max > 1 {
-        format!("{}…", s.chars().take(max - 1).collect::<String>())
+        // Trim by visual width, keeping the ellipsis within the budget.
+        let mut out = String::new();
+        let mut used = 0usize;
+        for c in s.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if used + cw + 1 > max {
+                break;
+            }
+            out.push(c);
+            used += cw;
+        }
+        format!("{out}…")
     } else {
         "…".into()
     }
 }
 fn compact_path(path: &Path, max: usize) -> String {
-    truncate(&path.display().to_string(), max)
+    let full = path.display().to_string();
+    let full_width = unicode_width::UnicodeWidthStr::width(full.as_str());
+    if full_width <= max {
+        return full;
+    }
+    if max <= 2 {
+        return "…".into();
+    }
+    // Elide the middle: keep the head (leading /) and the tail (current dir)
+    // so the relevant part stays visible. The tail gets more room.
+    let keep = max - 1;
+    let tail_budget = (keep * 2 / 3).max(1);
+    let head_budget = keep - tail_budget;
+    let mut head = String::new();
+    let mut used = 0usize;
+    for c in full.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > head_budget {
+            break;
+        }
+        head.push(c);
+        used += cw;
+    }
+    let mut tail = String::new();
+    let mut used = 0usize;
+    for c in full.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > tail_budget {
+            break;
+        }
+        tail.push(c);
+        used += cw;
+    }
+    format!("{head}…{}", tail.chars().rev().collect::<String>())
 }
 fn relative_time(d: Duration) -> String {
     let s = d.as_secs();
@@ -562,5 +608,32 @@ fn relative_time(d: Duration) -> String {
         format!("{}h ago", s / 3600)
     } else {
         format!("{}d ago", s / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn truncate_counts_visual_width() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 9), "hello wo…");
+        // A wide CJK char counts as two columns.
+        assert_eq!(truncate("日本語のテキスト", 6), "日本…");
+        // Emoji are double-width columns in unicode-width.
+        assert_eq!(truncate("🔥🔥🔥", 5), "🔥🔥…");
+    }
+
+    #[test]
+    fn compact_path_elides_the_middle() {
+        let p = Path::new("/home/firefly/Projects/optionFiles");
+        let out = compact_path(p, 20);
+        assert!(out.contains('…'));
+        assert!(out.ends_with("optionFiles"));
+        assert!(unicode_width::UnicodeWidthStr::width(out.as_str()) <= 20);
+        // Short paths are unchanged.
+        assert_eq!(compact_path(p, 200), p.display().to_string());
     }
 }

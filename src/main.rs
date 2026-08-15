@@ -102,7 +102,73 @@ fn info(path: &Path) -> Result<()> {
         "  path      {}",
         entry.path.canonicalize().unwrap_or(entry.path).display()
     );
+    if let Ok(metadata) = path.symlink_metadata() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = metadata.permissions().mode();
+        let file_type = metadata.file_type();
+        let kind = if file_type.is_dir() {
+            'd'
+        } else if file_type.is_symlink() {
+            'l'
+        } else {
+            '-'
+        };
+        let perms = format!(
+            "{}{}{}{}{}{}{}{}{}",
+            if mode & 0o400 != 0 { 'r' } else { '-' },
+            if mode & 0o200 != 0 { 'w' } else { '-' },
+            if mode & 0o100 != 0 { 'x' } else { '-' },
+            if mode & 0o040 != 0 { 'r' } else { '-' },
+            if mode & 0o020 != 0 { 'w' } else { '-' },
+            if mode & 0o010 != 0 { 'x' } else { '-' },
+            if mode & 0o004 != 0 { 'r' } else { '-' },
+            if mode & 0o002 != 0 { 'w' } else { '-' },
+            if mode & 0o001 != 0 { 'x' } else { '-' },
+        );
+        println!("  mode      {kind}{perms}");
+        println!(
+            "  owner     uid {} · gid {}",
+            metadata.uid(),
+            metadata.gid()
+        );
+    }
+    if let Some(modified) = entry.modified {
+        println!("  modified  {}", metadata::format_time(modified));
+    }
     Ok(())
+}
+
+mod metadata {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Render a file modification time as a compact local date, e.g. 2026-08-12 14:30.
+    pub fn format_time(time: SystemTime) -> String {
+        match time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => format_timestamp(duration.as_secs() as i64),
+            Err(_) => "before 1970".into(),
+        }
+    }
+
+    fn format_timestamp(secs: i64) -> String {
+        let days = secs.div_euclid(86400);
+        let rem = secs.rem_euclid(86400);
+        let (h, m) = (rem / 3600, (rem % 3600) / 60);
+        let (y, mo, d) = civil_from_days(days);
+        format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}")
+    }
+
+    fn civil_from_days(z: i64) -> (i64, i64, i64) {
+        let z = z + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        (if m <= 2 { y + 1 } else { y }, m, d)
+    }
 }
 
 fn interactive(path: &Path, all: bool) -> Result<()> {
@@ -206,6 +272,11 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
                             open_external(&path, &mut app);
                         }
                     }
+                    KeyCode::Char('e') => {
+                        if let Some(path) = app.current().map(|e| e.path.clone()) {
+                            edit_with_editor(&path, &mut app);
+                        }
+                    }
                     KeyCode::Char('a') | KeyCode::Char('.') => {
                         if let Err(e) = app.toggle_hidden() {
                             app.status = e.to_string();
@@ -297,6 +368,40 @@ fn open_external(path: &Path, app: &mut App) {
         Ok(_) => {
             app.status = format!(
                 "opened {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        }
+        Err(e) => app.status = e.to_string(),
+    }
+}
+
+fn edit_with_editor(path: &Path, app: &mut App) {
+    let editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL"));
+    let editor = match editor {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => {
+            app.status = "set $EDITOR to edit files".into();
+            return;
+        }
+    };
+    let mut command = if cfg!(target_os = "windows") {
+        ProcessCommand::new("cmd")
+    } else {
+        ProcessCommand::new("sh")
+    };
+    command
+        .arg(if cfg!(target_os = "windows") {
+            "/C"
+        } else {
+            "-c"
+        })
+        .arg(format!("{editor} \"$1\""))
+        .arg("optionfiles-editor")
+        .arg(path);
+    match command.spawn() {
+        Ok(_) => {
+            app.status = format!(
+                "editing {}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             )
         }
