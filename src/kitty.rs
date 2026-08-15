@@ -15,6 +15,8 @@ pub struct KittyPreview {
     supported: bool,
     last_source: Option<PathBuf>,
     converted: Option<PathBuf>,
+    payload: Option<String>,
+    last_position: Option<(u16, u16, u16, u16)>,
 }
 
 impl KittyPreview {
@@ -32,6 +34,7 @@ impl KittyPreview {
                         .map(|program| {
                             program.eq_ignore_ascii_case("wezterm")
                                 || program.eq_ignore_ascii_case("ghostty")
+                                || program.eq_ignore_ascii_case("optionterm")
                         })
                         .unwrap_or(false)
             }
@@ -40,6 +43,8 @@ impl KittyPreview {
             supported,
             last_source: None,
             converted: None,
+            payload: None,
+            last_position: None,
         }
     }
 
@@ -70,46 +75,67 @@ impl KittyPreview {
         if !self.supported || cols == 0 || rows == 0 {
             return Ok(());
         }
-        self.delete()?;
         let Some(source) = source.filter(|path| Self::can_preview(path)) else {
             self.last_source = None;
+            self.payload = None;
+            self.last_position = None;
+            self.delete()?;
             return Ok(());
         };
 
-        let image = if source
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-        {
-            source.to_path_buf()
-        } else if self.last_source.as_deref() == Some(source) {
-            match self.converted.as_ref().filter(|path| path.is_file()) {
-                Some(converted) => converted.clone(),
-                None => return Ok(()),
-            }
-        } else if let Some(converted) = convert_to_png(source) {
-            if let Some(old) = self.converted.replace(converted.clone()) {
-                let _ = fs::remove_file(old);
-            }
-            converted
-        } else {
-            self.last_source = None;
-            return Ok(());
-        };
+        let same_source = self.last_source.as_deref() == Some(source);
+        let same_position = self.last_position == Some((x, y, cols, rows));
 
-        let absolute = image.canonicalize().unwrap_or(image);
-        let payload = base64(absolute.to_string_lossy().as_bytes());
-        let command = format!(
-            "\x1b_Ga=T,f=100,t=f,I={IMAGE_NUMBER},p=1,c={cols},r={rows},C=1,q=2;{payload}\x1b\\"
-        );
-        let mut out = io::stdout();
-        queue!(out, cursor::MoveTo(x, y), Print(command))?;
-        out.flush()?;
+        // Nothing changed on screen; avoid resending the same frame.
+        if same_source && same_position {
+            return Ok(());
+        }
+
+        if self.payload.is_none() || !same_source {
+            let image = if source
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+            {
+                source.to_path_buf()
+            } else if self.last_source.as_deref() == Some(source) {
+                match self.converted.as_ref().filter(|path| path.is_file()) {
+                    Some(converted) => converted.clone(),
+                    None => return Ok(()),
+                }
+            } else if let Some(converted) = convert_to_png(source) {
+                if let Some(old) = self.converted.replace(converted.clone()) {
+                    let _ = fs::remove_file(old);
+                }
+                converted
+            } else {
+                self.last_source = None;
+                self.payload = None;
+                return Ok(());
+            };
+
+            let absolute = image.canonicalize().unwrap_or(image);
+            let payload = base64(absolute.to_string_lossy().as_bytes());
+            // q=1 lets the terminal replace the existing image without redraw
+            // flicker when only the position changes.
+            self.payload = Some(format!(
+                "\x1b_Ga=T,f=100,t=f,I={IMAGE_NUMBER},p=1,c={cols},r={rows},C=1,q=1;{payload}\x1b\\"
+            ));
+        }
+
+        if let Some(payload) = &self.payload {
+            let mut out = io::stdout();
+            queue!(out, cursor::MoveTo(x, y), Print(payload.as_str()))?;
+            out.flush()?;
+        }
         self.last_source = Some(source.to_path_buf());
+        self.last_position = Some((x, y, cols, rows));
         Ok(())
     }
 
     pub fn delete(&mut self) -> Result<()> {
+        self.payload = None;
+        self.last_position = None;
         if self.supported {
             let mut out = io::stdout();
             queue!(
