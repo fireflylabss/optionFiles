@@ -1,29 +1,16 @@
-[package]
-name = "optionfiles"
-version = "0.2.4"
+[workspace]
+members = ["crates/optionfiles-core", "crates/optionfiles-cli", "crates/optionfiles-gui"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.85"
-description = "optionFiles — minimal terminal file manager"
 authors = ["AEFireflyLabs"]
 license = "Apache-2.0"
-readme = "README.md"
-keywords = ["files", "file-manager", "terminal", "tui", "cli"]
-categories = ["command-line-utilities", "filesystem"]
 
-[[bin]]
-name = "optionfiles"
-path = "src/main.rs"
-
-[[bin]]
-name = "fls"
-path = "src/main.rs"
-
-[dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive", "color"] }
-crossterm = "0.28"
-optionSDK = "0.1.3"
-unicode-width = "0.2"
+[workspace.dependencies]
+optionSDK = { path = "../optionSDK", version = "0.1.3" }
 
 [profile.release]
 lto = true

@@ -19,6 +19,14 @@ Each release heading is the version and date; under it, a short summary ends wit
 
 </details>
 
+## v0.2.5-stable · 04/09/2026
+
+`doctor` command, family SDK path, and agent docs. This version was made for CLI with a stable release channel on 04/09/2026 (v0.2.5-stable).
+
+- New `fls doctor [--json]`: checks `~/.option/files` state dir, opener (`xdg-open`/`open`), clipboard (`wl-copy`/`xclip`/`pbcopy`), trash (`gio`/`trash`), and ImageMagick previews (`magick`/`convert`).
+- Depend on `optionSDK` via the local family path (`../optionSDK`) in all crates instead of crates.io only, matching `optionUtils`.
+- Add `VERSIONING.md` (single CLI surface) and refresh `AGENTS.md` (build/test/install checklist).
+
 ## v0.2.4-stable · 15/08/2026
 
 Trash, clipboard, fuzzy search and wider-column alignment. This version was made for CLI with a stable release channel on 15/08/2026 (v0.2.4-stable).

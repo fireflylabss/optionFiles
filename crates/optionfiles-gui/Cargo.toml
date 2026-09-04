@@ -1,0 +1,29 @@
+[package]
+name = "optionfiles-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "optionFiles — GTK4 desktop GUI (libadwaita)"
+authors.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["files", "file-manager", "gtk", "gui"]
+categories = ["gui"]
+
+[[bin]]
+name = "optionfiles-gtk"
+path = "src/main.rs"
+
+[[bin]]
+name = "fls-gtk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+optionSDK = { workspace = true }
+optionfiles-core = { path = "../optionfiles-core" }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_14"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+glib = { version = "0.20" }
+gio = { version = "0.20" }
+notify = "7"

@@ -1,0 +1,12 @@
+[package]
+name = "optionfiles-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "optionFiles core — filesystem, app state and metadata helpers (TUI/GUI shared)"
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+optionSDK = { workspace = true }

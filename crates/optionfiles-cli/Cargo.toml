@@ -1,0 +1,27 @@
+[package]
+name = "optionfiles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "optionFiles — minimal terminal file manager"
+authors.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["files", "file-manager", "terminal", "tui", "cli"]
+categories = ["command-line-utilities", "filesystem"]
+
+[[bin]]
+name = "optionfiles"
+path = "src/main.rs"
+
+[[bin]]
+name = "fls"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "color"] }
+crossterm = "0.28"
+optionSDK = { workspace = true }
+optionfiles-core = { path = "../optionfiles-core" }
+unicode-width = "0.2"
