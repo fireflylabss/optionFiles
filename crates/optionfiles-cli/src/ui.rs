@@ -10,9 +10,8 @@ use crossterm::style::{
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute, queue};
 
-use crate::app::{App, ClipboardMode};
-use crate::fs::{Entry, human_size};
 use crate::kitty::KittyPreview;
+use optionfiles_core::{App, ClipboardMode, Entry, human_size};
 
 pub const DIM: Color = Color::DarkGrey;
 pub const WHITE: Color = Color::White;

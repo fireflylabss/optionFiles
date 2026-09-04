@@ -269,7 +269,7 @@ impl App {
     }
 }
 
-fn trash_path(path: &Path) -> Result<()> {
+pub fn trash_path(path: &Path) -> Result<()> {
     if trash_command(path).is_ok() {
         return Ok(());
     }
@@ -278,7 +278,7 @@ fn trash_path(path: &Path) -> Result<()> {
 
 /// Push the selected path into the system clipboard so it can be pasted in
 /// other applications. Returns the helper name on success.
-fn clipboard_export(path: &Path) -> Result<Option<&'static str>> {
+pub fn clipboard_export(path: &Path) -> Result<Option<&'static str>> {
     if cfg!(target_os = "macos") {
         return match Command::new("pbcopy")
             .stdin(Stdio::piped())
@@ -330,7 +330,7 @@ fn clipboard_export(path: &Path) -> Result<Option<&'static str>> {
 
 /// Read a path from the system clipboard, if a helper is available and the
 /// contents look like a file URI.
-fn clipboard_import() -> Option<PathBuf> {
+pub fn clipboard_import() -> Option<PathBuf> {
     for program in ["wl-paste", "xclip"] {
         let args: &[&str] = if program == "wl-paste" {
             &["--no-newline"]
@@ -523,7 +523,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-fn validate_entry_name(name: &str) -> Result<()> {
+pub fn validate_entry_name(name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         bail!("name is empty");
@@ -551,7 +551,7 @@ fn validate_entry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn remove_path(path: &Path) -> Result<()> {
+pub fn remove_path(path: &Path) -> Result<()> {
     if path.is_dir() {
         fs::remove_dir_all(path)?
     } else {
@@ -560,7 +560,7 @@ fn remove_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unique_path(path: &Path) -> PathBuf {
+pub fn unique_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or(Path::new("."));
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("copy");
     let ext = path.extension().and_then(|s| s.to_str());
@@ -580,7 +580,7 @@ fn unique_path(path: &Path) -> PathBuf {
 /// Score how well `terms` appear as a subsequence of `name` (all lowercase).
 /// Returns None when any term is missing. Consecutive matches and camelCase
 /// boundaries score higher, so results read like fzf ranking.
-fn fuzzy_score(name: &str, terms: &[&str]) -> Option<i64> {
+pub fn fuzzy_score(name: &str, terms: &[&str]) -> Option<i64> {
     let mut score = 0i64;
     let mut pos = 0usize;
     let bytes = name.as_bytes();
