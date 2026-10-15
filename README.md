@@ -23,7 +23,7 @@ cd optionFiles
 cargo install --path crates/optionfiles-cli
 ```
 
-The CLI install provides `optionfiles` and `fls`.
+The CLI install provides `optionfiles` and `fls`. The optional GTK drag-and-drop helper is installed separately; see [Native drag and drop](#native-drag-and-drop).
 
 ## Usage
 
@@ -131,6 +131,41 @@ Install the optional preview tools on Arch / CachyOS:
 ```bash
 sudo pacman -S imagemagick ffmpeg poppler libarchive
 ```
+
+## Native drag and drop
+
+### Kitty OSC 72
+
+Kitty 0.47 or newer provides the native OSC 72 drag-and-drop protocol. optionFiles queries protocol support rather than treating graphics support as proof of drag-and-drop support.
+
+Press `D` to arm the outgoing native source, then drag the selected file bundle out of the directory list. Press `D` again to restore internal dragging. Incoming local file URI bundles can be dropped onto an idle directory list to copy into that pane's directory. Drops outside directory lists or while a blocking operation/overlay is active are rejected. Desktop targets decide which file bundles they accept.
+
+Direct OSC 72 completion depends on the terminal implementation. Kitty 0.48.2's Wayland backend [destroys the drop offer without sending `wl_data_offer.finish`](https://github.com/kovidgoyal/kitty/blob/v0.48.2/glfw/wl_window.c), so an incoming copy can succeed while a GTK source reports cancellation. Native completion for this direct path has not been verified. Use the GTK helper bridge when an explicit transfer acknowledgement is needed.
+
+Older terminals' pasted paths are only a compatibility path; they do not provide full native source/target support.
+
+### Optional GTK helper
+
+`optionfiles-dnd` is a separate GTK window for native file dragging on terminals without OSC 72. Building it requires the GUI crate's GTK 4.14+ and libadwaita 1.5+ development dependencies. It is not installed by the CLI-only command above:
+
+```bash
+cargo install --path crates/optionfiles-gui --bin optionfiles-dnd
+```
+
+On Arch / CachyOS, install the development libraries with `sudo pacman -S gtk4 libadwaita`. optionFiles looks for the helper beside its own executable, then on `PATH`. Ctrl+D opens its outgoing copy-only drag window even when Kitty advertises OSC 72. Drag from that window to the desktop target. When OSC 72 is unavailable, uppercase `D` also opens this window.
+
+Ctrl+V opens an incoming GTK drop pad. Its destination is the active pane's directory when the pad opens; navigating afterward does not change that destination. Drop local files onto the pad to copy them with the normal transfer worker and conflict choices. optionFiles sends `ACCEPT` only after every declared item copies successfully, with no skips, errors or cancellation; otherwise it sends `REJECT`. Already copied files remain after a rejected partial transfer. Completion requires both the helper's explicit completion event and a successful helper exit, not just a local copy result. Ctrl+C cancels the transfer or idle helper, and exiting optionFiles closes and reaps the helper.
+
+The helper can also run independently:
+
+```bash
+optionfiles-dnd send -- '/path/with spaces/photo.png' /path/to/notes.txt
+optionfiles-dnd receive
+```
+
+The standalone `receive` window emits a file URI bundle on stdout as `DROP_BEGIN count`, one `DROP URI` line per file, then `DROP_END`. Its caller must reply with `ACCEPT` or `REJECT` on stdin. Only acknowledge acceptance after handling the bundle; receipt alone is not completion. Other events include `READY`, `DRAGGING`, `COMPLETED copy|receive`, `CANCELLED reason` and `ERROR reason`. Exit status is 0 for acknowledged completion, 2 for cancellation and 1 for an error. Escape or closing the window cancels. The helper never deletes source files.
+
+The helper's send/receive path has been exercised on Wayland with multiple file URIs, including spaces and accented names. This does not establish compatibility with every desktop application; browser, Discord and Nautilus UI drops have not been verified.
 
 ## Requirements
 
