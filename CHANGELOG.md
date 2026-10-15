@@ -19,6 +19,19 @@ Each release heading is the version and date; under it, a short summary ends wit
 
 </details>
 
+## UNRELEASED
+
+Asynchronous browsing and batch transfers, richer previews, optional dual panes and native file drag and drop. These changes are unreleased; no release date, channel or tag has been assigned.
+
+- Load directories, convert previews and run transfers asynchronously. Filter loaded entries in memory, refresh with Ctrl+R, and retain each directory's cursor and scroll position during the session.
+- Mark files with `t` / Insert, extend a range with Shift+Up/Down, select all visible entries with Ctrl+A and clear marks with `u`.
+- Toggle dual panes with `w`, switch the active source with Tab and use F5/F6 to copy/move to the other pane. F5 still refreshes in single-pane mode; Ctrl+R refreshes in either mode.
+- Handle batch conflicts with overwrite, skip or keep-both choices (`o` / `s` / `k`), with `a` to apply a choice to remaining conflicts. Cancel transfers with Ctrl+C and inspect partial failures with `!`.
+- Exchange multiple file URIs and GNOME copy/cut clipboard payloads with system clipboard tools. Preserve symbolic links, use native rename for same-filesystem moves, stage cross-device copies before removing sources, and reject self-copy and recursive destination paths.
+- Preview folders, readable extensionless files and source code, PDF text/pages, video frames, audio metadata/cover art and archive listings. Use `p` for text/image mode and `[` / `]` to scroll; optional converters are ImageMagick, FFmpeg, Poppler and libarchive.
+- Add Kitty OSC 72 native file dragging on Kitty 0.47+: `D` arms/disarms the outgoing source, and incoming local URI bundles can be dropped onto an idle directory list. Kitty 0.48.2 Wayland has a known missing drop-finish acknowledgement; direct native completion is not verified. Legacy pasted paths remain a compatibility input, not full native drag support or an unambiguous encoding for arbitrary unquoted spaces/newlines.
+- Add the separately installed GTK `optionfiles-dnd` bridge: Ctrl+D opens an outgoing copy handle, and Ctrl+V opens a receive pad bound to the current directory. Incoming bundles use normal transfer/conflict handling; `ACCEPT` requires every declared item to copy successfully, otherwise `REJECT` is sent. Completion requires a helper completion event and successful exit. Standalone send/receive was exercised on Wayland with multiple paths including spaces and accented names; browser, Discord and Nautilus UI compatibility was not verified.
+
 ## v0.2.5-stable · 04/09/2026
 
 `doctor` command, family SDK path, and agent docs. This version was made for CLI with a stable release channel on 04/09/2026 (v0.2.5-stable).
