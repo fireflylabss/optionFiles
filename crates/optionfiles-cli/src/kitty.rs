@@ -1,21 +1,16 @@
-//! Image previews using the Kitty terminal graphics protocol.
-
-use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use crossterm::style::Print;
-use crossterm::{cursor, queue};
+use crossterm::{cursor, queue, terminal};
 
-const IMAGE_NUMBER: u32 = 0x0F11E5;
+use crate::preview::PreparedImage;
+
+const IMAGE_ID: u32 = 0x0F11E5;
 
 pub struct KittyPreview {
     supported: bool,
-    last_source: Option<PathBuf>,
-    converted: Option<PathBuf>,
-    payload: Option<String>,
+    last_image: Option<u64>,
     last_position: Option<(u16, u16, u16, u16)>,
 }
 
@@ -41,9 +36,7 @@ impl KittyPreview {
         };
         Self {
             supported,
-            last_source: None,
-            converted: None,
-            payload: None,
+            last_image: None,
             last_position: None,
         }
     }
@@ -52,161 +45,110 @@ impl KittyPreview {
         self.supported
     }
 
-    pub fn can_preview(path: &Path) -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| {
-                matches!(
-                    ext.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tif" | "tiff"
-                )
-            })
-            .unwrap_or(false)
-    }
-
     pub fn render(
         &mut self,
-        source: Option<&Path>,
+        image: Option<&PreparedImage>,
         x: u16,
         y: u16,
         cols: u16,
         rows: u16,
     ) -> Result<()> {
-        if !self.supported || cols == 0 || rows == 0 {
+        if !self.supported {
             return Ok(());
         }
-        let Some(source) = source.filter(|path| Self::can_preview(path)) else {
-            self.last_source = None;
-            self.payload = None;
-            self.last_position = None;
-            self.delete()?;
-            return Ok(());
+        let Some(image) = image.filter(|_| cols > 0 && rows > 0) else {
+            return self.delete();
         };
-
-        let same_source = self.last_source.as_deref() == Some(source);
-        let same_position = self.last_position == Some((x, y, cols, rows));
-
-        // Nothing changed on screen; avoid resending the same frame.
-        if same_source && same_position {
+        let (cell_width, cell_height) = terminal::window_size()
+            .ok()
+            .filter(|size| size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0)
+            .map(|size| {
+                (
+                    f64::from(size.width) / f64::from(size.columns),
+                    f64::from(size.height) / f64::from(size.rows),
+                )
+            })
+            .unwrap_or((8.0, 16.0));
+        let (image_cols, image_rows) = placement(
+            image.width,
+            image.height,
+            cols,
+            rows,
+            cell_width,
+            cell_height,
+        );
+        let x = x.saturating_add(cols.saturating_sub(image_cols) / 2);
+        let position = (x, y, image_cols, image_rows);
+        if self.last_image == Some(image.id) && self.last_position == Some(position) {
             return Ok(());
         }
-
-        if self.payload.is_none() || !same_source {
-            let image = if source
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
-            {
-                source.to_path_buf()
-            } else if self.last_source.as_deref() == Some(source) {
-                match self.converted.as_ref().filter(|path| path.is_file()) {
-                    Some(converted) => converted.clone(),
-                    None => return Ok(()),
-                }
-            } else if let Some(converted) = convert_to_png(source) {
-                if let Some(old) = self.converted.replace(converted.clone()) {
-                    let _ = fs::remove_file(old);
-                }
-                converted
+        self.delete()?;
+        let mut out = io::stdout();
+        queue!(out, cursor::MoveTo(x, y))?;
+        let mut chunks = image.payload.as_bytes().chunks(4096).peekable();
+        let mut first = true;
+        while let Some(chunk) = chunks.next() {
+            let more = u8::from(chunks.peek().is_some());
+            if first {
+                queue!(
+                    out,
+                    Print(format!(
+                        "\x1b_Ga=T,f=100,t=d,i={IMAGE_ID},p=1,c={image_cols},r={image_rows},C=1,q=2,m={more};"
+                    ))
+                )?;
+                first = false;
             } else {
-                self.last_source = None;
-                self.payload = None;
-                return Ok(());
-            };
-
-            let absolute = image.canonicalize().unwrap_or(image);
-            let payload = base64(absolute.to_string_lossy().as_bytes());
-            // q=1 lets the terminal replace the existing image without redraw
-            // flicker when only the position changes.
-            self.payload = Some(format!(
-                "\x1b_Ga=T,f=100,t=f,I={IMAGE_NUMBER},p=1,c={cols},r={rows},C=1,q=1;{payload}\x1b\\"
-            ));
+                queue!(out, Print(format!("\x1b_Gm={more},q=2;")))?;
+            }
+            out.write_all(chunk)?;
+            out.write_all(b"\x1b\\")?;
         }
-
-        if let Some(payload) = &self.payload {
-            let mut out = io::stdout();
-            queue!(out, cursor::MoveTo(x, y), Print(payload.as_str()))?;
-            out.flush()?;
-        }
-        self.last_source = Some(source.to_path_buf());
-        self.last_position = Some((x, y, cols, rows));
+        out.flush()?;
+        self.last_image = Some(image.id);
+        self.last_position = Some(position);
         Ok(())
     }
 
     pub fn delete(&mut self) -> Result<()> {
-        self.payload = None;
-        self.last_position = None;
-        if self.supported {
+        if self.supported && self.last_image.is_some() {
             let mut out = io::stdout();
-            queue!(
-                out,
-                Print(format!("\x1b_Ga=d,d=N,I={IMAGE_NUMBER},p=1,q=2\x1b\\"))
-            )?;
+            queue!(out, Print(format!("\x1b_Ga=d,d=I,i={IMAGE_ID},q=2\x1b\\")))?;
             out.flush()?;
         }
+        self.last_image = None;
+        self.last_position = None;
         Ok(())
     }
 
     pub fn shutdown(&mut self) {
         let _ = self.delete();
         self.supported = false;
-        if let Some(path) = self.converted.take() {
-            let _ = fs::remove_file(path);
-        }
     }
 }
 
 impl Drop for KittyPreview {
     fn drop(&mut self) {
         let _ = self.delete();
-        if let Some(path) = self.converted.take() {
-            let _ = fs::remove_file(path);
-        }
     }
 }
 
-fn convert_to_png(source: &Path) -> Option<PathBuf> {
-    let target = std::env::temp_dir().join(format!(
-        "optionfiles-tty-graphics-protocol-{}.png",
-        std::process::id()
-    ));
-    let source_frame = format!("{}[0]", source.display());
-    for program in ["magick", "convert"] {
-        let status = Command::new(program)
-            .arg(&source_frame)
-            .arg(&target)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.is_ok_and(|status| status.success()) && target.is_file() {
-            return Some(target);
-        }
-    }
-    None
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        output.push(TABLE[(a >> 2) as usize] as char);
-        output.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
-        output.push(if chunk.len() > 1 {
-            TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            TABLE[(c & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    output
+fn placement(
+    width: u32,
+    height: u32,
+    cols: u16,
+    rows: u16,
+    cell_width: f64,
+    cell_height: f64,
+) -> (u16, u16) {
+    let scale = (f64::from(cols) * cell_width / f64::from(width.max(1)))
+        .min(f64::from(rows) * cell_height / f64::from(height.max(1)));
+    let image_cols = (f64::from(width) * scale / cell_width)
+        .round()
+        .clamp(1.0, f64::from(cols.max(1))) as u16;
+    let image_rows = (f64::from(height) * scale / cell_height)
+        .round()
+        .clamp(1.0, f64::from(rows.max(1))) as u16;
+    (image_cols, image_rows)
 }
 
 #[cfg(test)]
@@ -214,15 +156,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encodes_base64() {
-        assert_eq!(base64(b"kitty"), "a2l0dHk=");
-        assert_eq!(base64(b"png"), "cG5n");
-    }
-
-    #[test]
-    fn recognizes_image_extensions() {
-        assert!(KittyPreview::can_preview(Path::new("cover.PNG")));
-        assert!(KittyPreview::can_preview(Path::new("photo.jpeg")));
-        assert!(!KittyPreview::can_preview(Path::new("notes.md")));
+    fn placement_preserves_image_aspect_ratio_in_cells() {
+        assert_eq!(placement(400, 200, 30, 10, 8.0, 16.0), (30, 8));
+        assert_eq!(placement(200, 400, 30, 10, 8.0, 16.0), (10, 10));
+        assert_eq!(placement(400, 200, 15, 5, 8.0, 16.0), (15, 4));
     }
 }

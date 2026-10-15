@@ -1,5 +1,9 @@
 mod cli;
+mod dnd;
+mod input;
+mod interaction;
 mod kitty;
+mod preview;
 mod ui;
 
 use std::io::{self, IsTerminal};
@@ -9,9 +13,7 @@ use std::process::Command as ProcessCommand;
 use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Command};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use optionfiles_core::{App, ClipboardMode, Entry, SortMode, format_time, human_size, read_dir};
-use ui::{Prompt, PromptKind, TerminalUi};
+use optionfiles_core::{App, Entry, SortMode, format_time, human_size, read_dir};
 
 fn main() {
     if let Err(error) = run() {
@@ -204,183 +206,7 @@ fn interactive(path: &Path, all: bool) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return list(path, all);
     }
-    let mut app = App::new(path, all)?;
-    let mut terminal = TerminalUi::enter()?;
-    let mut prompt: Option<Prompt> = None;
-    loop {
-        terminal.draw(&mut app, prompt.as_ref())?;
-        match event::read()? {
-            Event::Resize(_, _) => continue,
-            Event::Mouse(mouse) if prompt.is_none() && !app.help => match mouse.kind {
-                MouseEventKind::ScrollUp => app.move_by(-3),
-                MouseEventKind::ScrollDown => app.move_by(3),
-                MouseEventKind::Down(_) => {
-                    let row = mouse.row.saturating_sub(5) as usize + app.scroll;
-                    if row < app.entries.len() {
-                        app.selected = row;
-                    }
-                }
-                _ => {}
-            },
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if let Some(p) = prompt.as_mut() {
-                    match key.code {
-                        KeyCode::Esc => prompt = None,
-                        KeyCode::Enter => {
-                            let p = prompt.take().unwrap();
-                            let result = match p.kind {
-                                PromptKind::Folder => app.create_dir(p.value.trim()),
-                                PromptKind::File => app.create_file(p.value.trim()),
-                                PromptKind::Rename => app.rename_current(p.value.trim()),
-                                PromptKind::Delete if p.value.eq_ignore_ascii_case("y") => {
-                                    app.delete_current()
-                                }
-                                PromptKind::Delete => {
-                                    app.status = "delete cancelled".into();
-                                    Ok(())
-                                }
-                                PromptKind::Search => app.set_filter(p.value),
-                            };
-                            if let Err(e) = result {
-                                app.status = e.to_string();
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            p.value.pop();
-                        }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            p.value.push(c)
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                if app.help {
-                    if matches!(
-                        key.code,
-                        KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q')
-                    ) {
-                        app.help = false;
-                    }
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        prompt = Some(Prompt {
-                            kind: PromptKind::Search,
-                            value: app.filter.clone(),
-                        })
-                    }
-                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Err(e) = app.refresh() {
-                            app.status = e.to_string();
-                        } else {
-                            app.status = "refreshed".into();
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => app.move_by(-1),
-                    KeyCode::Down | KeyCode::Char('j') => app.move_by(1),
-                    KeyCode::PageUp => app.move_by(-10),
-                    KeyCode::PageDown => app.move_by(10),
-                    KeyCode::Home | KeyCode::Char('g') => app.home(),
-                    KeyCode::End | KeyCode::Char('G') => app.end(),
-                    KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => {
-                        if let Err(e) = app.parent() {
-                            app.status = e.to_string();
-                        }
-                    }
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => match app.enter() {
-                        Ok(Some(path)) => open_external(&path, &mut app),
-                        Ok(None) => {}
-                        Err(e) => app.status = e.to_string(),
-                    },
-                    KeyCode::Char('o') => {
-                        if let Some(path) = app.current().map(|e| e.path.clone()) {
-                            open_external(&path, &mut app);
-                        }
-                    }
-                    KeyCode::Char('e') => {
-                        if let Some(path) = app.current().map(|e| e.path.clone()) {
-                            edit_with_editor(&path, &mut app);
-                        }
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('.') => {
-                        if let Err(e) = app.toggle_hidden() {
-                            app.status = e.to_string();
-                        }
-                    }
-                    KeyCode::Char('s') => {
-                        if let Err(e) = app.cycle_sort() {
-                            app.status = e.to_string();
-                        }
-                    }
-                    KeyCode::Char(' ') => app.preview = !app.preview,
-                    KeyCode::Char('/') => {
-                        prompt = Some(Prompt {
-                            kind: PromptKind::Search,
-                            value: app.filter.clone(),
-                        })
-                    }
-                    KeyCode::Char('~') => {
-                        if let Err(e) = app.go_home() {
-                            app.status = e.to_string();
-                        }
-                    }
-                    KeyCode::Char('-') => {
-                        if let Err(e) = app.go_previous() {
-                            app.status = e.to_string();
-                        }
-                    }
-                    KeyCode::Char('?') => app.help = true,
-                    KeyCode::Char('c') => app.set_clipboard(ClipboardMode::Copy),
-                    KeyCode::Char('x') => app.set_clipboard(ClipboardMode::Cut),
-                    KeyCode::Char('v') => {
-                        if let Err(e) = app.paste() {
-                            app.status = e.to_string();
-                        }
-                    }
-                    KeyCode::Char('n') => {
-                        prompt = Some(Prompt {
-                            kind: PromptKind::Folder,
-                            value: String::new(),
-                        })
-                    }
-                    KeyCode::Char('N') => {
-                        prompt = Some(Prompt {
-                            kind: PromptKind::File,
-                            value: String::new(),
-                        })
-                    }
-                    KeyCode::Char('r') | KeyCode::F(2) => {
-                        if let Some(name) = app.current().map(|e| e.name.clone()) {
-                            prompt = Some(Prompt {
-                                kind: PromptKind::Rename,
-                                value: name,
-                            });
-                        }
-                    }
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        prompt = Some(Prompt {
-                            kind: PromptKind::Delete,
-                            value: String::new(),
-                        })
-                    }
-                    KeyCode::F(5) => {
-                        if let Err(e) = app.refresh() {
-                            app.status = e.to_string();
-                        } else {
-                            app.status = "refreshed".into();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    interaction::run(path, all)
 }
 
 fn open_external(path: &Path, app: &mut App) {
@@ -391,6 +217,9 @@ fn open_external(path: &Path, app: &mut App) {
     };
     match ProcessCommand::new(command)
         .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .with_context(|| format!("cannot run {command}"))
     {
@@ -427,13 +256,14 @@ fn edit_with_editor(path: &Path, app: &mut App) {
         .arg(format!("{editor} \"$1\""))
         .arg("optionfiles-editor")
         .arg(path);
-    match command.spawn() {
-        Ok(_) => {
+    match command.status() {
+        Ok(status) if status.success() => {
             app.status = format!(
-                "editing {}",
+                "edited {}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             )
         }
+        Ok(status) => app.status = format!("editor exited with {status}"),
         Err(e) => app.status = e.to_string(),
     }
 }

@@ -924,10 +924,7 @@ fn status_line(snapshot: &Snapshot) -> String {
             optionfiles_core::ClipboardMode::Copy => "copiar",
             optionfiles_core::ClipboardMode::Cut => "recortar",
         };
-        parts.push(format!(
-            "{verb} {}",
-            clip.path.file_name().unwrap_or_default().to_string_lossy()
-        ));
+        parts.push(format!("{verb} {} arquivo(s)", clip.paths.len()));
     }
     if !snapshot.status.is_empty() {
         parts.push(snapshot.status.clone());
@@ -1003,12 +1000,7 @@ pub fn navigate_to(path: PathBuf) {
         if target == core.cwd {
             return Ok(());
         }
-        core.previous_dir = Some(core.cwd.clone());
-        core.cwd = target;
-        core.selected = 0;
-        core.scroll = 0;
-        core.refresh()?;
-        Ok(())
+        core.navigate(&target)
     });
 }
 
@@ -1017,12 +1009,7 @@ fn navigate_raw(path: PathBuf) {
     mutate_with(
         move |core| {
             let target = path.canonicalize().unwrap_or(path);
-            core.previous_dir = Some(core.cwd.clone());
-            core.cwd = target;
-            core.selected = 0;
-            core.scroll = 0;
-            core.refresh()?;
-            Ok(())
+            core.navigate(&target)
         },
         false,
     );
@@ -1585,7 +1572,7 @@ pub fn show_delete() {
     };
     dialogs::confirm_delete(&window, &current, || {
         mutate(|core| {
-            core.delete_current()?;
+            core.delete_selected()?;
             Ok(())
         });
     });

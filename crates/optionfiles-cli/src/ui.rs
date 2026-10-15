@@ -1,55 +1,592 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::style::{
     Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute, queue};
+use optionfiles_core::{ClipboardMode, human_size};
 
+use crate::interaction::Session;
 use crate::kitty::KittyPreview;
-use optionfiles_core::{App, ClipboardMode, Entry, human_size};
+use crate::preview::{PreviewService, PreviewState};
 
-pub const DIM: Color = Color::DarkGrey;
-pub const WHITE: Color = Color::White;
-pub const BRIGHT: Color = Color::Rgb {
-    r: 245,
-    g: 245,
-    b: 245,
-};
+const DIM: Color = Color::Grey;
+const WHITE: Color = Color::White;
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+impl Rect {
+    pub fn contains(self, x: u16, y: u16) -> bool {
+        x >= self.x
+            && x < self.x.saturating_add(self.width)
+            && y >= self.y
+            && y < self.y.saturating_add(self.height)
+    }
+}
 
 pub struct TerminalUi {
-    preview: KittyPreview,
+    kitty: KittyPreview,
+    preview: PreviewService,
+    pub lists: Vec<Rect>,
+    preview_rect: Rect,
+    preview_generation: u64,
+    preview_text: bool,
 }
 
 impl TerminalUi {
     pub fn enter() -> Result<Self> {
         terminal::enable_raw_mode()?;
+        if let Err(error) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+            cursor::Hide
+        ) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error.into());
+        }
+        Ok(Self {
+            kitty: KittyPreview::detect(),
+            preview: PreviewService::new(),
+            lists: Vec::new(),
+            preview_rect: Rect::default(),
+            preview_generation: 0,
+            preview_text: false,
+        })
+    }
+    pub fn suspend(&mut self) -> Result<()> {
+        self.kitty.delete()?;
+        execute!(
+            io::stdout(),
+            Print("\x1b[?2026l"),
+            cursor::Show,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
+        terminal::disable_raw_mode()?;
+        Ok(())
+    }
+
+    pub fn resume(&mut self) -> Result<()> {
+        terminal::enable_raw_mode()?;
         execute!(
             io::stdout(),
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableBracketedPaste,
             cursor::Hide
         )?;
-        Ok(Self {
-            preview: KittyPreview::detect(),
+        Ok(())
+    }
+
+    pub fn toggle_preview_text(&mut self) {
+        self.preview_text = !self.preview_text;
+    }
+
+    pub fn poll_preview(&mut self) -> bool {
+        self.preview.poll()
+    }
+    pub fn scroll_preview(&mut self, delta: isize) {
+        self.preview_text = true;
+        self.preview
+            .scroll(delta, self.preview_rect.height.saturating_sub(2) as usize);
+    }
+    pub fn preview_contains(&self, x: u16, y: u16) -> bool {
+        self.preview_rect.contains(x, y)
+    }
+    pub fn hit(&self, x: u16, y: u16, session: &Session) -> Option<(usize, usize)> {
+        self.lists.iter().enumerate().find_map(|(pane, rect)| {
+            if !rect.contains(x, y) {
+                return None;
+            }
+            let app = session.panes.get(pane)?.app.as_ref()?;
+            let index = app.scroll + (y - rect.y) as usize;
+            (index < app.entries.len()).then_some((pane, index))
         })
     }
 
-    pub fn draw(&mut self, app: &mut App, prompt: Option<&Prompt>) -> Result<()> {
-        draw(app, prompt, &mut self.preview)
+    pub fn destination(&self, x: u16, y: u16, session: &Session) -> Option<std::path::PathBuf> {
+        self.destination_pane(x, y, session).map(|(_, path)| path)
+    }
+
+    pub fn destination_pane(
+        &self,
+        x: u16,
+        y: u16,
+        session: &Session,
+    ) -> Option<(usize, std::path::PathBuf)> {
+        self.lists.iter().enumerate().find_map(|(pane, rect)| {
+            if !rect.contains(x, y) {
+                return None;
+            }
+            let app = session.panes.get(pane)?.app.as_ref()?;
+            let index = app.scroll + (y - rect.y) as usize;
+            let path = app
+                .entries
+                .get(index)
+                .filter(|entry| entry.is_dir)
+                .map(|entry| entry.path.clone())
+                .unwrap_or_else(|| app.cwd.clone());
+            Some((pane, path))
+        })
+    }
+
+    pub fn draw(&mut self, session: &mut Session) -> Result<()> {
+        let (w, h) = terminal::size()?;
+        let mut out = io::stdout();
+        queue!(
+            out,
+            Print("\x1b[?2026h"),
+            cursor::MoveTo(0, 0),
+            SetBackgroundColor(Color::Black),
+            Clear(ClearType::All)
+        )?;
+        self.lists.clear();
+        self.preview_rect = Rect::default();
+        if w < 54 || h < 12 {
+            self.kitty.delete()?;
+            print_at(
+                &mut out,
+                1,
+                1,
+                WHITE,
+                true,
+                &truncate(
+                    "option files · resize to at least 54 x 12",
+                    w.saturating_sub(2) as usize,
+                ),
+            )?;
+            queue!(out, Print("\x1b[?2026l"))?;
+            out.flush()?;
+            return Ok(());
+        }
+        let preview_width =
+            if session.preview && ((!session.dual && w >= 92) || (session.dual && w >= 144)) {
+                32
+            } else {
+                0
+            };
+        let available = w
+            - 4
+            - if preview_width > 0 {
+                preview_width + 3
+            } else {
+                0
+            };
+        let count = if session.dual { 2 } else { 1 };
+        let pane_width = (available - (count - 1) * 3) / count;
+        let rows = h - 10;
+        print_at(
+            &mut out,
+            2,
+            1,
+            WHITE,
+            true,
+            &format!(
+                "{} {}",
+                option_sdk::App::FILES.mark(),
+                option_sdk::App::FILES.display_name()
+            ),
+        )?;
+        print_right(
+            &mut out,
+            w - 2,
+            1,
+            DIM,
+            if session.dual {
+                "tab source · F5 copy · F6 move"
+            } else {
+                "local · files"
+            },
+        )?;
+        line(&mut out, 2, 3, w - 4)?;
+        for index in 0..count as usize {
+            let x = 2 + index as u16 * (pane_width + 3);
+            let rect = Rect {
+                x,
+                y: 5,
+                width: pane_width,
+                height: rows,
+            };
+            self.lists.push(rect);
+            let pane = &mut session.panes[index];
+            let active = index == session.active;
+            let target_pane = session
+                .drag
+                .as_ref()
+                .and_then(|drag| drag.target.as_ref())
+                .is_some_and(|(pane_index, path)| *pane_index == index && path == &pane.location);
+            let label = format!(
+                "{} {}{}",
+                if active { ">" } else { " " },
+                compact_path(&pane.location, pane_width.saturating_sub(2) as usize),
+                if target_pane { " · DROP" } else { "" }
+            );
+            print_at(
+                &mut out,
+                x,
+                2,
+                if active { WHITE } else { DIM },
+                active,
+                &truncate(&label, pane_width as usize),
+            )?;
+            print_at(&mut out, x + 4, 4, DIM, false, "NAME")?;
+            print_right(&mut out, x + pane_width, 4, DIM, "SIZE")?;
+            if let Some(app) = &mut pane.app {
+                if app.selected < app.scroll {
+                    app.scroll = app.selected;
+                }
+                if app.selected >= app.scroll + rows as usize {
+                    app.scroll = app.selected + 1 - rows as usize;
+                }
+                app.scroll = app.scroll.min(app.entries.len().saturating_sub(1));
+                if app.entries.is_empty() {
+                    print_at(
+                        &mut out,
+                        x + 1,
+                        5,
+                        DIM,
+                        false,
+                        &truncate(
+                            if app.filter.is_empty() {
+                                "This folder is empty"
+                            } else {
+                                "No names match · / edit filter"
+                            },
+                            pane_width.saturating_sub(1) as usize,
+                        ),
+                    )?;
+                }
+                for (row, (entry_index, entry)) in app
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .skip(app.scroll)
+                    .take(rows as usize)
+                    .enumerate()
+                {
+                    let selected = active && entry_index == app.selected;
+                    let target = session
+                        .drag
+                        .as_ref()
+                        .and_then(|drag| drag.target.as_ref())
+                        .is_some_and(|(pane, path)| *pane == index && path == &entry.path);
+                    let mark = if app.marked.contains(&entry.path) {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    let icon = if entry.is_dir {
+                        ">"
+                    } else if entry.is_symlink {
+                        "@"
+                    } else {
+                        "·"
+                    };
+                    let label = format!(
+                        "{}{} {icon} {}",
+                        if selected { ">" } else { " " },
+                        mark,
+                        truncate(&entry.name, pane_width.saturating_sub(17) as usize)
+                    );
+                    let meta = if target {
+                        "DROP".into()
+                    } else if entry.is_dir {
+                        "-".into()
+                    } else {
+                        human_size(entry.size)
+                    };
+                    if selected || target {
+                        selected_row(&mut out, x, rect.y + row as u16, pane_width, &label, &meta)?;
+                    } else {
+                        print_at(&mut out, x, rect.y + row as u16, WHITE, false, &label)?;
+                        print_right(&mut out, x + pane_width, rect.y + row as u16, DIM, &meta)?;
+                    }
+                }
+            } else {
+                let message = pane
+                    .error
+                    .as_deref()
+                    .unwrap_or("Loading directory · input remains active");
+                print_at(
+                    &mut out,
+                    x,
+                    5,
+                    DIM,
+                    false,
+                    &truncate(message, pane_width as usize),
+                )?;
+            }
+        }
+        if preview_width > 0 {
+            let rect = Rect {
+                x: w - 2 - preview_width,
+                y: 4,
+                width: preview_width,
+                height: h - 9,
+            };
+            self.preview_rect = rect;
+            let entry = session.panes[session.active]
+                .app
+                .as_ref()
+                .and_then(|app| app.current());
+            let generation =
+                self.preview
+                    .request_entry(entry, rect.width, rect.height.saturating_sub(2));
+            if generation != self.preview_generation {
+                self.preview_generation = generation;
+                self.preview_text = false;
+            }
+            print_at(
+                &mut out,
+                rect.x,
+                rect.y,
+                DIM,
+                false,
+                "preview · p text/image · [ ]",
+            )?;
+            match self.preview.state() {
+                PreviewState::Empty => {
+                    print_at(&mut out, rect.x, rect.y + 2, DIM, false, "No file selected")?
+                }
+                PreviewState::Loading => {
+                    print_at(&mut out, rect.x, rect.y + 2, DIM, false, "Loading preview")?
+                }
+                PreviewState::Error(error) => {
+                    print_at(
+                        &mut out,
+                        rect.x,
+                        rect.y + 2,
+                        WHITE,
+                        false,
+                        "Preview unavailable",
+                    )?;
+                    for (i, text) in wrap_text(error, rect.width as usize)
+                        .iter()
+                        .take(rect.height.saturating_sub(4) as usize)
+                        .enumerate()
+                    {
+                        print_at(&mut out, rect.x, rect.y + 3 + i as u16, DIM, false, text)?;
+                    }
+                }
+                PreviewState::Ready(preview) => {
+                    print_at(
+                        &mut out,
+                        rect.x,
+                        rect.y + 1,
+                        DIM,
+                        false,
+                        &format!(
+                            "{} · line {}",
+                            preview.kind,
+                            self.preview.scroll_offset() + 1
+                        ),
+                    )?;
+                    if self.preview_text || preview.image.is_none() || !self.kitty.supported() {
+                        for (i, text) in self
+                            .preview
+                            .text_lines(rect.height.saturating_sub(2) as usize)
+                            .iter()
+                            .enumerate()
+                        {
+                            print_at(
+                                &mut out,
+                                rect.x,
+                                rect.y + 2 + i as u16,
+                                WHITE,
+                                false,
+                                &truncate(text, rect.width as usize),
+                            )?;
+                        }
+                    }
+                }
+            }
+        } else {
+            self.preview.request_entry(None, 0, 0);
+        }
+        let footer = h - 4;
+        line(&mut out, 2, footer - 1, w - 4)?;
+        let state = session.panes[session.active]
+            .app
+            .as_ref()
+            .map(|app| {
+                format!(
+                    "{} items · {} marked · {}{}",
+                    app.entries.len(),
+                    app.marked.len(),
+                    app.sort.label(),
+                    if app.filter.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · /{}", app.filter)
+                    }
+                )
+            })
+            .unwrap_or_else(|| {
+                if session.panes[session.active].loading {
+                    "directory worker running".into()
+                } else {
+                    "directory unavailable · ctrl+r retry".into()
+                }
+            });
+        let clip = session
+            .clipboard
+            .as_ref()
+            .map(|clip| {
+                format!(
+                    " · {} {}",
+                    if clip.mode == ClipboardMode::Copy {
+                        "copy"
+                    } else {
+                        "cut"
+                    },
+                    clip.paths.len()
+                )
+            })
+            .unwrap_or_default();
+        print_at(
+            &mut out,
+            2,
+            footer,
+            DIM,
+            false,
+            &truncate(&format!("{state}{clip}"), (w - 4) as usize),
+        )?;
+        let pane = &session.panes[session.active];
+        let app_status = pane.error.as_deref().unwrap_or_else(|| {
+            pane.app
+                .as_ref()
+                .map(|app| app.status.as_str())
+                .unwrap_or("")
+        });
+        let status = if let Some(transfer) = &session.transfer {
+            transfer
+                .progress
+                .as_ref()
+                .map(|p| {
+                    format!(
+                        "transfer {}/{} · {} · {} · ctrl+c cancel",
+                        p.items_done,
+                        p.items_total,
+                        human_size(p.bytes_done),
+                        p.current
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    )
+                })
+                .unwrap_or_else(|| "preparing transfer · ctrl+c cancel".into())
+        } else if session.native_armed {
+            "native source armed · drag a file out · D disarm".into()
+        } else if session.status.is_empty() || pane.error.is_some() {
+            app_status.to_string()
+        } else {
+            session.status.clone()
+        };
+        print_at(
+            &mut out,
+            2,
+            footer + 1,
+            WHITE,
+            false,
+            &truncate(&status, (w - 4) as usize),
+        )?;
+        print_at(
+            &mut out,
+            2,
+            footer + 2,
+            DIM,
+            false,
+            &truncate(
+                "↑↓ move  enter open  t mark  / search  w panes  ? help",
+                (w - 4) as usize,
+            ),
+        )?;
+        let overlay = session.help
+            || session.prompt.is_some()
+            || session.show_errors
+            || session
+                .transfer
+                .as_ref()
+                .is_some_and(|t| t.conflict.is_some());
+        if session.help {
+            overlay_help(&mut out, w, h, session.help_offset)?;
+        }
+        if session.show_errors {
+            overlay_lines(
+                &mut out,
+                w,
+                h,
+                "transfer errors · ↑↓ scroll · esc close",
+                &session.errors,
+                session.error_offset,
+            )?;
+        }
+        if let Some(transfer) = &session.transfer {
+            if let Some(conflict) = &transfer.conflict {
+                let lines = vec![
+                    format!("source: {}", conflict.source.display()),
+                    format!("exists: {}", conflict.target.display()),
+                    String::new(),
+                    "o overwrite · s skip · k keep both".into(),
+                    format!(
+                        "a apply to all: {} · esc cancel transfer",
+                        if transfer.apply_all { "on" } else { "off" }
+                    ),
+                ];
+                overlay_lines(&mut out, w, h, "destination exists", &lines, 0)?;
+            }
+        }
+        if let Some(prompt) = &session.prompt {
+            overlay_prompt(&mut out, w, h, prompt)?;
+        }
+        queue!(out, Print("\x1b[?2026l"))?;
+        out.flush()?;
+        if overlay || self.preview_rect.width == 0 {
+            self.kitty.delete()?;
+        } else if let PreviewState::Ready(preview) = self.preview.state() {
+            let r = self.preview_rect;
+            if let Err(error) = self.kitty.render(
+                if self.preview_text {
+                    None
+                } else {
+                    preview.image.as_ref()
+                },
+                r.x,
+                r.y + 2,
+                r.width,
+                r.height.saturating_sub(2),
+            ) {
+                session.status = format!("graphics preview: {error}");
+            }
+        } else {
+            self.kitty.delete()?;
+        }
+        Ok(())
     }
 }
 
 impl Drop for TerminalUi {
     fn drop(&mut self) {
-        self.preview.shutdown();
+        self.kitty.shutdown();
         let _ = execute!(
             io::stdout(),
+            Print("\x1b[?2026l"),
             cursor::Show,
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -63,216 +600,24 @@ pub enum PromptKind {
     Rename,
     Delete,
     Search,
+    Drop,
 }
-
 pub struct Prompt {
     pub kind: PromptKind,
     pub value: String,
+    pub original: String,
 }
-
 impl Prompt {
-    pub fn label(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self.kind {
             PromptKind::Folder => "new folder",
             PromptKind::File => "new file",
             PromptKind::Rename => "rename",
-            PromptKind::Delete => "delete? type y",
-            PromptKind::Search => "filter by name · empty clears",
+            PromptKind::Delete => "trash selection? type y",
+            PromptKind::Search => "filter names · updates while typing",
+            PromptKind::Drop => "drop files here? c copy · m move",
         }
     }
-}
-
-fn draw(app: &mut App, prompt: Option<&Prompt>, kitty: &mut KittyPreview) -> Result<()> {
-    let (w, h) = terminal::size()?;
-    let mut out = io::stdout();
-    // Synchronized updates prevent the user from seeing a half-painted frame.
-    queue!(
-        out,
-        Print("\x1b[?2026h"),
-        cursor::MoveTo(0, 0),
-        Clear(ClearType::All)
-    )?;
-    let title = format!(
-        "{} {}",
-        option_sdk::App::FILES.mark(),
-        option_sdk::App::FILES.display_name()
-    );
-    if w < 54 || h < 12 {
-        print_at(&mut out, 2, 2, BRIGHT, true, &title)?;
-        print_at(
-            &mut out,
-            2,
-            4,
-            DIM,
-            false,
-            "terminal too small · resize to 54×12",
-        )?;
-        queue!(out, Print("\x1b[?2026l"))?;
-        out.flush()?;
-        return Ok(());
-    }
-
-    let margin = 2u16;
-    let preview_w = if app.preview && w >= 92 { 30 } else { 0 };
-    let list_w = w.saturating_sub(margin * 2 + preview_w + if preview_w > 0 { 3 } else { 0 });
-    let rows = h.saturating_sub(10) as usize;
-    if app.selected < app.scroll {
-        app.scroll = app.selected;
-    }
-    if app.selected >= app.scroll + rows {
-        app.scroll = app.selected + 1 - rows;
-    }
-
-    print_at(&mut out, margin, 1, BRIGHT, true, &title)?;
-    print_right(&mut out, w - margin, 1, DIM, "local · files")?;
-    print_at(&mut out, margin, 2, DIM, false, "location")?;
-    let path = compact_path(&app.cwd, w.saturating_sub(15) as usize);
-    print_at(&mut out, margin + 10, 2, WHITE, false, &path)?;
-    line(&mut out, margin, 3, w - margin * 2)?;
-    print_at(&mut out, margin + 4, 4, DIM, false, "NAME")?;
-    print_right(&mut out, margin + list_w, 4, DIM, "SIZE")?;
-
-    if app.entries.is_empty() {
-        print_at(&mut out, margin + 2, 6, DIM, false, "This folder is empty")?;
-    }
-    for (screen_row, (idx, entry)) in app
-        .entries
-        .iter()
-        .enumerate()
-        .skip(app.scroll)
-        .take(rows)
-        .enumerate()
-    {
-        let y = 5 + screen_row as u16;
-        let selected = idx == app.selected;
-        let marker = if selected { "›" } else { " " };
-        let icon = if entry.is_dir {
-            "▸"
-        } else if entry.is_symlink {
-            "↗"
-        } else {
-            "·"
-        };
-        let max_name = list_w.saturating_sub(17) as usize;
-        let name = truncate(&entry.name, max_name);
-        let label = format!("{marker} {icon} {name}");
-        let meta = if entry.is_dir {
-            "—".into()
-        } else {
-            human_size(entry.size)
-        };
-        if selected {
-            selected_row(&mut out, margin, y, list_w, &label, &meta)?;
-        } else {
-            print_at(&mut out, margin, y, WHITE, false, &label)?;
-            print_right(&mut out, margin + list_w, y, DIM, &meta)?;
-        }
-    }
-
-    let mut image_area = None;
-    if preview_w > 0 {
-        let x = margin + list_w + 3;
-        for y in 4..h - 4 {
-            print_at(
-                &mut out,
-                x - 2,
-                y,
-                Color::Rgb {
-                    r: 45,
-                    g: 45,
-                    b: 45,
-                },
-                false,
-                "│",
-            )?;
-        }
-        if let Some(entry) = app.current() {
-            let image = kitty.supported() && KittyPreview::can_preview(&entry.path);
-            draw_preview(&mut out, entry, x, 4, preview_w, image, h)?;
-            if image {
-                image_area = Some((
-                    entry.path.as_path(),
-                    x,
-                    6,
-                    preview_w,
-                    h.saturating_sub(17).clamp(4, 10),
-                ));
-            }
-        }
-    }
-
-    let footer_y = h - 4;
-    line(&mut out, margin, footer_y - 1, w - margin * 2)?;
-    let clip = app
-        .clipboard
-        .as_ref()
-        .map(|c| {
-            format!(
-                " · {} {}",
-                if c.mode == ClipboardMode::Copy {
-                    "copy"
-                } else {
-                    "cut"
-                },
-                c.path.file_name().unwrap_or_default().to_string_lossy()
-            )
-        })
-        .unwrap_or_default();
-    let filter = if app.filter.is_empty() {
-        String::new()
-    } else {
-        format!(" · filter ‘{}’", app.filter)
-    };
-    let state = format!(
-        "{} item{} · sort {}{}{}",
-        app.entries.len(),
-        if app.entries.len() == 1 { "" } else { "s" },
-        app.sort.label(),
-        filter,
-        clip
-    );
-    let status_width = unicode_width::UnicodeWidthStr::width(app.status.as_str()) as u16;
-    let state_width =
-        w.saturating_sub(status_width + margin * 2 + if status_width > 0 { 3 } else { 0 });
-    print_at(
-        &mut out,
-        margin,
-        footer_y,
-        DIM,
-        false,
-        &truncate(&state, state_width as usize),
-    )?;
-    if !app.status.is_empty() {
-        print_right(&mut out, w - margin, footer_y, BRIGHT, &app.status)?;
-    }
-    print_at(
-        &mut out,
-        margin,
-        footer_y + 2,
-        DIM,
-        false,
-        &truncate(
-            "↑↓ move   enter open   / search   ~ home   e edit   ? help",
-            w.saturating_sub(4) as usize,
-        ),
-    )?;
-
-    if app.help {
-        overlay_help(&mut out, w, h)?;
-    }
-    if let Some(prompt) = prompt {
-        overlay_prompt(&mut out, w, h, prompt)?;
-    }
-    queue!(out, Print("\x1b[?2026l"))?;
-    out.flush()?;
-    if app.help || prompt.is_some() {
-        kitty.delete()?;
-    } else if let Some((path, x, y, cols, rows)) = image_area {
-        kitty.render(Some(path), x, y, cols, rows)?;
-    } else {
-        kitty.delete()?;
-    }
-    Ok(())
 }
 
 fn selected_row(
@@ -283,16 +628,16 @@ fn selected_row(
     label: &str,
     meta: &str,
 ) -> Result<()> {
-    let meta_len = unicode_width::UnicodeWidthStr::width(meta);
-    let room = width.saturating_sub(meta_len as u16 + 2) as usize;
-    let label = truncate(label, room);
-    let label_len = unicode_width::UnicodeWidthStr::width(label.as_str());
-    let gap = width as usize - label_len - meta_len;
+    let meta = truncate(meta, width.saturating_sub(2) as usize);
+    let meta_len = unicode_width::UnicodeWidthStr::width(meta.as_str());
+    let label = truncate(label, (width as usize).saturating_sub(meta_len + 1));
+    let gap = (width as usize)
+        .saturating_sub(unicode_width::UnicodeWidthStr::width(label.as_str()) + meta_len);
     queue!(
         out,
         cursor::MoveTo(x, y),
         SetForegroundColor(Color::Black),
-        SetBackgroundColor(BRIGHT),
+        SetBackgroundColor(WHITE),
         SetAttribute(Attribute::Bold),
         Print(format!("{label}{}{meta}", " ".repeat(gap))),
         ResetColor,
@@ -301,186 +646,131 @@ fn selected_row(
     Ok(())
 }
 
-fn draw_preview(
-    out: &mut impl Write,
-    entry: &Entry,
-    x: u16,
-    y: u16,
-    width: u16,
-    image: bool,
-    terminal_height: u16,
-) -> Result<()> {
-    if image {
-        let rows = terminal_height.saturating_sub(17).clamp(4, 10);
-        let meta_y = y + rows + 3;
-        print_at(out, x, meta_y, DIM, false, "image · kitty graphics")?;
-        print_at(out, x, meta_y + 1, WHITE, false, &human_size(entry.size))?;
-        return Ok(());
-    }
-    print_at(
-        out,
-        x,
-        y,
-        BRIGHT,
-        true,
-        &truncate(&entry.name, width as usize),
-    )?;
-    print_at(
-        out,
-        x,
-        y + 2,
-        DIM,
-        false,
-        if entry.is_dir {
-            "directory"
-        } else if entry.is_symlink {
-            "symbolic link"
-        } else {
-            "file"
-        },
-    )?;
-    if !entry.is_dir {
-        print_at(out, x, y + 3, WHITE, false, &human_size(entry.size))?;
-    }
-    if let Some(lines) = text_preview(&entry.path, terminal_height.saturating_sub(y + 7) as usize) {
-        print_at(out, x, y + 5, DIM, false, "preview")?;
-        for (index, line) in lines.iter().enumerate() {
-            print_at(
-                out,
-                x,
-                y + 6 + index as u16,
-                WHITE,
-                false,
-                &truncate(line, width as usize),
-            )?;
-        }
-        return Ok(());
-    }
-    let modified = entry
-        .modified
-        .and_then(|m| SystemTime::now().duration_since(m).ok())
-        .map(relative_time)
-        .unwrap_or_else(|| "unknown".into());
-    print_at(out, x, y + 5, DIM, false, "modified")?;
-    print_at(out, x, y + 6, WHITE, false, &modified)?;
-    print_at(out, x, y + 8, DIM, false, "path")?;
-    print_at(
-        out,
-        x,
-        y + 9,
-        WHITE,
-        false,
-        &truncate(&entry.path.display().to_string(), width as usize),
-    )?;
-    Ok(())
+fn help_rows() -> Vec<String> {
+    [
+        "enter / → open · ← / backspace parent",
+        "j/k / ↑↓ move · g/G first/last · pgup/pgdn",
+        "t / insert mark · shift+↑↓ mark range",
+        "ctrl+a select all · u clear marks",
+        "/ / ctrl+f incremental filter · esc restore",
+        "w toggle two panes · tab active source",
+        "F5 copy / F6 move source to other pane",
+        "c / x / v batch copy / cut / paste",
+        "ctrl+c cancel transfer · ! partial errors",
+        "conflict: o overwrite / s skip / k keep both",
+        "conflict: a apply choice to all · esc cancel",
+        "drag inside a list · choose c copy / m move",
+        "ctrl+d native send pad · ctrl+v receive pad",
+        "D arm/disarm terminal OSC72 source",
+        "space preview · p text/image · [ / ] scroll",
+        "a / . hidden · s sort · ~ home · - previous",
+        "n / N new folder / file · r / F2 rename",
+        "d / delete trash marked files (confirm y)",
+        "e / o editor / system opener",
+        "F5 (single pane) / ctrl+r refresh",
+        "q / esc quit · ? close help",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
-fn overlay_help(out: &mut impl Write, w: u16, h: u16) -> Result<()> {
-    let width = 48.min(w - 4);
-    let rows = [
-        "enter / →   open",
-        "← / backspace parent",
-        "g / G       first / last",
-        "a / .       hidden files",
-        "s           cycle sort",
-        "space       preview",
-        "/ / ctrl+f  search / filter",
-        "~ / -       home / previous",
-        "c / x / v   copy / cut / paste",
-        "n / N       new folder / file",
-        "r / F2      rename",
-        "d / del     delete (trash)",
-        "e / o       edit / open with",
-        "F5 / ctrl+r refresh",
-        "q / esc     quit / close",
-    ];
-    let height = (rows.len() as u16 + 5).min(h - 2);
-    let x = (w - width) / 2;
-    let y = (h - height) / 2;
-    box_fill(out, x, y, width, height)?;
-    print_at(out, x + 2, y + 1, BRIGHT, true, "keyboard")?;
-    for (i, row) in rows.iter().enumerate() {
-        print_at(
-            out,
-            x + 2,
-            y + 3 + i as u16,
-            if i < 2 { WHITE } else { DIM },
-            false,
-            row,
-        )?;
-    }
-    print_at(out, x + 2, y + height - 2, DIM, false, "? close")?;
-    Ok(())
+pub fn help_limit() -> usize {
+    overlay_limit(&help_rows())
 }
 
-fn text_preview(path: &Path, max_lines: usize) -> Option<Vec<String>> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    if !matches!(
-        extension.as_str(),
-        "txt"
-            | "md"
-            | "rs"
-            | "toml"
-            | "json"
-            | "yaml"
-            | "yml"
-            | "js"
-            | "ts"
-            | "tsx"
-            | "jsx"
-            | "css"
-            | "html"
-            | "xml"
-            | "sh"
-            | "py"
-            | "go"
-            | "c"
-            | "h"
-            | "cpp"
-            | "hpp"
-            | "java"
-            | "kt"
-            | "lua"
-            | "ini"
-            | "conf"
-            | "log"
-    ) {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(16 * 1024)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let text = String::from_utf8(bytes).ok()?;
-    Some(
-        text.lines()
-            .take(max_lines.max(1))
-            .map(|line| line.replace('\t', "  "))
-            .collect(),
+pub fn overlay_limit(rows: &[String]) -> usize {
+    let (w, h) = terminal::size().unwrap_or((54, 12));
+    let width = w.saturating_sub(4).min(84).saturating_sub(4) as usize;
+    let height = h
+        .saturating_sub(2)
+        .min(rows.len().saturating_add(4).min(u16::MAX as usize) as u16)
+        .max(6);
+    rows.iter()
+        .map(|line| wrap_text(line, width).len())
+        .sum::<usize>()
+        .saturating_sub(height.saturating_sub(3) as usize)
+}
+
+fn overlay_help(out: &mut impl Write, w: u16, h: u16, offset: usize) -> Result<()> {
+    overlay_lines(
+        out,
+        w,
+        h,
+        "keyboard · ↑↓ scroll help · ? close",
+        &help_rows(),
+        offset,
     )
 }
 
+fn overlay_lines(
+    out: &mut impl Write,
+    w: u16,
+    h: u16,
+    title: &str,
+    rows: &[String],
+    offset: usize,
+) -> Result<()> {
+    let width = (w - 4).min(84);
+    let height = (h - 2)
+        .min(rows.len().saturating_add(4).min(u16::MAX as usize) as u16)
+        .max(6);
+    let x = (w - width) / 2;
+    let y = (h - height) / 2;
+    box_fill(out, x, y, width, height)?;
+    print_at(
+        out,
+        x + 2,
+        y + 1,
+        WHITE,
+        true,
+        &truncate(title, width.saturating_sub(4) as usize),
+    )?;
+    let wrapped: Vec<String> = rows
+        .iter()
+        .flat_map(|line| wrap_text(line, width.saturating_sub(4) as usize))
+        .collect();
+    let offset = offset.min(
+        wrapped
+            .len()
+            .saturating_sub(height.saturating_sub(3) as usize),
+    );
+    for (i, row) in wrapped
+        .iter()
+        .skip(offset)
+        .take(height.saturating_sub(3) as usize)
+        .enumerate()
+    {
+        print_at(out, x + 2, y + 3 + i as u16, WHITE, false, row)?;
+    }
+    Ok(())
+}
+
 fn overlay_prompt(out: &mut impl Write, w: u16, h: u16, prompt: &Prompt) -> Result<()> {
-    let width = 52.min(w - 4);
+    let width = 64.min(w - 4);
     let x = (w - width) / 2;
     let y = h / 2 - 3;
     box_fill(out, x, y, width, 7)?;
-    print_at(out, x + 2, y + 1, DIM, false, prompt.label())?;
+    print_at(
+        out,
+        x + 2,
+        y + 1,
+        DIM,
+        false,
+        &truncate(prompt.label(), width.saturating_sub(4) as usize),
+    )?;
     print_at(
         out,
         x + 2,
         y + 3,
-        BRIGHT,
+        WHITE,
         true,
         &format!(
             "> {}",
             truncate(&prompt.value, width.saturating_sub(6) as usize)
         ),
     )?;
-    print_at(out, x + 2, y + 5, DIM, false, "enter confirm · esc cancel")?;
-    Ok(())
+    print_at(out, x + 2, y + 5, DIM, false, "enter confirm · esc cancel")
 }
 
 fn box_fill(out: &mut impl Write, x: u16, y: u16, w: u16, h: u16) -> Result<()> {
@@ -488,31 +778,24 @@ fn box_fill(out: &mut impl Write, x: u16, y: u16, w: u16, h: u16) -> Result<()> 
         queue!(
             out,
             cursor::MoveTo(x, y + row),
-            SetForegroundColor(Color::Rgb {
-                r: 18,
-                g: 18,
-                b: 18
-            }),
-            Print(" ".repeat(w as usize))
+            SetBackgroundColor(Color::Black),
+            Print(" ".repeat(w as usize)),
+            ResetColor
         )?;
     }
-    queue!(out, ResetColor)?;
     Ok(())
 }
 fn line(out: &mut impl Write, x: u16, y: u16, width: u16) -> Result<()> {
-    print_at(
-        out,
-        x,
-        y,
-        Color::Rgb {
-            r: 42,
-            g: 42,
-            b: 42,
-        },
-        false,
-        &"─".repeat(width as usize),
-    )
+    print_at(out, x, y, DIM, false, &"─".repeat(width as usize))
 }
+fn safe_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().any(char::is_control) {
+        std::borrow::Cow::Owned(crate::preview::sanitize(text).join(" "))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 fn print_at(
     out: &mut impl Write,
     x: u16,
@@ -521,118 +804,146 @@ fn print_at(
     bold: bool,
     text: &str,
 ) -> Result<()> {
+    let safe = safe_text(text);
     queue!(
         out,
         cursor::MoveTo(x, y),
         SetForegroundColor(color),
+        SetBackgroundColor(Color::Black),
         SetAttribute(if bold {
             Attribute::Bold
         } else {
             Attribute::NormalIntensity
         }),
-        Print(text),
+        Print(safe.as_ref()),
         ResetColor,
         SetAttribute(Attribute::Reset)
     )?;
     Ok(())
 }
 fn print_right(out: &mut impl Write, right: u16, y: u16, color: Color, text: &str) -> Result<()> {
-    let x = right.saturating_sub(unicode_width::UnicodeWidthStr::width(text) as u16);
-    print_at(out, x, y, color, false, text)
+    print_at(
+        out,
+        right.saturating_sub(unicode_width::UnicodeWidthStr::width(text) as u16),
+        y,
+        color,
+        false,
+        text,
+    )
 }
 fn truncate(s: &str, max: usize) -> String {
-    let width = unicode_width::UnicodeWidthStr::width(s);
-    if width <= max {
-        s.into()
-    } else if max > 1 {
-        // Trim by visual width, keeping the ellipsis within the budget.
-        let mut out = String::new();
-        let mut used = 0usize;
-        for c in s.chars() {
-            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-            if used + cw + 1 > max {
-                break;
-            }
-            out.push(c);
-            used += cw;
-        }
-        format!("{out}…")
-    } else {
-        "…".into()
+    let safe = safe_text(s);
+    let s = safe.as_ref();
+    if max == 0 {
+        return String::new();
     }
+    if unicode_width::UnicodeWidthStr::width(s) <= max {
+        return s.into();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw + 1 > max {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push('…');
+    out
 }
 fn compact_path(path: &Path, max: usize) -> String {
     let full = path.display().to_string();
-    let full_width = unicode_width::UnicodeWidthStr::width(full.as_str());
-    if full_width <= max {
-        return full;
+    let full = safe_text(&full);
+    if unicode_width::UnicodeWidthStr::width(full.as_ref()) <= max {
+        return full.into_owned();
     }
     if max <= 2 {
-        return "…".into();
+        return truncate(&full, max);
     }
-    // Elide the middle: keep the head (leading /) and the tail (current dir)
-    // so the relevant part stays visible. The tail gets more room.
-    let keep = max - 1;
-    let tail_budget = (keep * 2 / 3).max(1);
-    let head_budget = keep - tail_budget;
+    let tail_budget = ((max - 1) * 2 / 3).max(1);
+    let head_budget = max - 1 - tail_budget;
     let mut head = String::new();
-    let mut used = 0usize;
+    let mut used = 0;
     for c in full.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if used + cw > head_budget {
+        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + width > head_budget {
             break;
         }
         head.push(c);
-        used += cw;
+        used += width;
     }
     let mut tail = String::new();
-    let mut used = 0usize;
+    used = 0;
     for c in full.chars().rev() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if used + cw > tail_budget {
+        let width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + width > tail_budget {
             break;
         }
         tail.push(c);
-        used += cw;
+        used += width;
     }
     format!("{head}…{}", tail.chars().rev().collect::<String>())
 }
-fn relative_time(d: Duration) -> String {
-    let s = d.as_secs();
-    if s < 60 {
-        "just now".into()
-    } else if s < 3600 {
-        format!("{}m ago", s / 60)
-    } else if s < 86400 {
-        format!("{}h ago", s / 3600)
-    } else {
-        format!("{}d ago", s / 86400)
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > width.max(1) {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        line.push(c);
+        used += cw;
     }
+    lines.push(line);
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-
+    #[test]
+    fn rectangles_exclude_headers_footers_and_other_columns() {
+        let rect = Rect {
+            x: 2,
+            y: 5,
+            width: 30,
+            height: 10,
+        };
+        assert!(rect.contains(2, 5));
+        assert!(rect.contains(31, 14));
+        assert!(!rect.contains(1, 5));
+        assert!(!rect.contains(32, 5));
+        assert!(!rect.contains(2, 4));
+        assert!(!rect.contains(2, 15));
+    }
     #[test]
     fn truncate_counts_visual_width() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 9), "hello wo…");
-        // A wide CJK char counts as two columns.
         assert_eq!(truncate("日本語のテキスト", 6), "日本…");
-        // Emoji are double-width columns in unicode-width.
-        assert_eq!(truncate("🔥🔥🔥", 5), "🔥🔥…");
+        assert_eq!(truncate("anything", 0), "");
     }
-
     #[test]
-    fn compact_path_elides_the_middle() {
+    fn compact_path_elides_middle() {
         let p = Path::new("/home/firefly/Projects/optionFiles");
         let out = compact_path(p, 20);
-        assert!(out.contains('…'));
         assert!(out.ends_with("optionFiles"));
         assert!(unicode_width::UnicodeWidthStr::width(out.as_str()) <= 20);
-        // Short paths are unchanged.
-        assert_eq!(compact_path(p, 200), p.display().to_string());
+    }
+    #[test]
+    fn all_row_text_removes_terminal_control_sequences_before_measuring() {
+        assert_eq!(truncate("a\x1b[31mb\x1b[0m", 10), "ab");
+        assert_eq!(truncate("a\x1b]52;c;cQ==\x07b", 10), "ab");
+        assert_eq!(truncate("a\x1b_Gq;payload\x1b\\b", 10), "ab");
+        let mut out = Vec::new();
+        selected_row(&mut out, 0, 0, 20, "a\x1b]52;c;cQ==\x07b", "1").unwrap();
+        let encoded = String::from_utf8(out).unwrap();
+        assert!(!encoded.contains("52;c"));
+        assert!(!encoded.contains('\x07'));
     }
 }

@@ -1,21 +1,23 @@
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 
-use crate::fs::{Entry, SortMode, copy_recursively, read_dir};
+use crate::clipboard::{Clipboard, ClipboardMode, clipboard_export, clipboard_import};
+use crate::fs::{Entry, SortMode, copy_recursively, read_dir, sort_entries};
+use crate::transfer::{
+    ConflictAction, ConflictResolution, TransferReport, TransferRequest, run_transfer,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClipboardMode {
-    Copy,
-    Cut,
-}
-
-#[derive(Debug, Clone)]
-pub struct Clipboard {
-    pub path: PathBuf,
-    pub mode: ClipboardMode,
+#[derive(Clone, Default)]
+struct DirectoryState {
+    focused: Option<PathBuf>,
+    scroll: usize,
+    marked: BTreeSet<PathBuf>,
+    filter: String,
 }
 
 pub struct App {
@@ -24,6 +26,7 @@ pub struct App {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub scroll: usize,
+    pub marked: BTreeSet<PathBuf>,
     pub show_hidden: bool,
     pub sort: SortMode,
     pub clipboard: Option<Clipboard>,
@@ -31,6 +34,8 @@ pub struct App {
     pub help: bool,
     pub preview: bool,
     pub filter: String,
+    snapshot: Vec<Entry>,
+    directories: HashMap<PathBuf, DirectoryState>,
 }
 
 impl App {
@@ -46,6 +51,7 @@ impl App {
             entries: vec![],
             selected: 0,
             scroll: 0,
+            marked: BTreeSet::new(),
             show_hidden,
             sort: SortMode::Name,
             clipboard: None,
@@ -53,6 +59,8 @@ impl App {
             help: false,
             preview: true,
             filter: String::new(),
+            snapshot: vec![],
+            directories: HashMap::new(),
         };
         app.refresh()?;
         if path.is_file() {
@@ -60,7 +68,7 @@ impl App {
                 app.selected = app
                     .entries
                     .iter()
-                    .position(|e| e.path.file_name() == Some(name))
+                    .position(|entry| entry.path.file_name() == Some(name))
                     .unwrap_or(0);
             }
         }
@@ -68,176 +76,265 @@ impl App {
     }
 
     pub fn refresh(&mut self) -> Result<()> {
-        let selected = self.current().map(|e| e.name.clone());
-        self.entries = read_dir(&self.cwd, self.show_hidden, self.sort)?;
-        if !self.filter.is_empty() {
-            let needle = self.filter.to_lowercase();
-            // Plain substring when the query is a single contiguous token,
-            // fuzzy subsequence ranking otherwise (spaces or scattered letters).
-            if needle.split_whitespace().count() == 1 && !needle.is_empty() {
-                self.entries
-                    .retain(|entry| entry.name.to_lowercase().contains(&needle));
-            } else {
-                let terms: Vec<&str> = needle.split_whitespace().collect();
-                let mut scored: Vec<(i64, &Entry)> = self
-                    .entries
-                    .iter()
-                    .filter_map(|entry| {
-                        fuzzy_score(&entry.name.to_lowercase(), &terms).map(|score| (score, entry))
-                    })
-                    .collect();
-                scored.sort_by(|a, b| b.0.cmp(&a.0));
-                self.entries = scored.into_iter().map(|(_, entry)| entry.clone()).collect();
-            }
-        }
-        self.selected = selected
-            .and_then(|n| self.entries.iter().position(|e| e.name == n))
-            .unwrap_or(self.selected.min(self.entries.len().saturating_sub(1)));
+        let snapshot = read_dir(&self.cwd, true, self.sort)?;
+        self.marked
+            .retain(|path| snapshot.iter().any(|entry| &entry.path == path));
+        self.snapshot = snapshot;
+        self.rebuild_view();
         Ok(())
     }
+
+    fn rebuild_view(&mut self) {
+        let focused = self.current().map(|entry| entry.path.clone());
+        let needle = self.filter.to_lowercase();
+        let terms: Vec<&str> = needle.split_whitespace().collect();
+        let mut scored = Vec::with_capacity(self.snapshot.len());
+        for (index, entry) in self.snapshot.iter().enumerate() {
+            if !self.show_hidden && entry.name.starts_with('.') {
+                continue;
+            }
+            let score = if needle.is_empty() {
+                Some(0)
+            } else if terms.len() == 1 {
+                entry.normalized_name.contains(&needle).then_some(0)
+            } else {
+                fuzzy_score(&entry.normalized_name, &terms)
+            };
+            if let Some(score) = score {
+                scored.push((score, index));
+            }
+        }
+        if terms.len() > 1 {
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+        self.entries.clear();
+        self.entries.extend(
+            scored
+                .into_iter()
+                .map(|(_, index)| self.snapshot[index].clone()),
+        );
+        self.selected = focused
+            .and_then(|path| self.entries.iter().position(|entry| entry.path == path))
+            .unwrap_or(self.selected.min(self.entries.len().saturating_sub(1)));
+        self.scroll = self.scroll.min(self.entries.len().saturating_sub(1));
+    }
+
     pub fn current(&self) -> Option<&Entry> {
         self.entries.get(self.selected)
     }
-    pub fn move_by(&mut self, delta: isize) {
-        if self.entries.is_empty() {
-            return;
+
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        if self.marked.is_empty() {
+            self.current()
+                .map(|entry| vec![entry.path.clone()])
+                .unwrap_or_default()
+        } else {
+            self.marked.iter().cloned().collect()
         }
+    }
+
+    pub fn toggle_selection(&mut self) {
+        if let Some(path) = self.current().map(|entry| entry.path.clone()) {
+            if !self.marked.remove(&path) {
+                self.marked.insert(path);
+            }
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.marked
+            .extend(self.entries.iter().map(|entry| entry.path.clone()));
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.marked.clear();
+    }
+
+    pub fn move_by(&mut self, delta: isize) {
         self.selected = self
             .selected
             .saturating_add_signed(delta)
-            .min(self.entries.len() - 1);
+            .min(self.entries.len().saturating_sub(1));
     }
+
     pub fn home(&mut self) {
         self.selected = 0;
     }
+
     pub fn end(&mut self) {
         self.selected = self.entries.len().saturating_sub(1);
     }
+
+    pub fn navigate(&mut self, path: &Path) -> Result<()> {
+        let target = path
+            .canonicalize()
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        if !target.is_dir() {
+            bail!("not a directory: {}", target.display());
+        }
+        if target == self.cwd {
+            return self.refresh();
+        }
+        // Load first so a failed navigation leaves the active location intact.
+        let snapshot = read_dir(&target, true, self.sort)?;
+        self.directories.insert(
+            self.cwd.clone(),
+            DirectoryState {
+                focused: self.current().map(|entry| entry.path.clone()),
+                scroll: self.scroll,
+                marked: self.marked.clone(),
+                filter: self.filter.clone(),
+            },
+        );
+        let state = self.directories.get(&target).cloned().unwrap_or_default();
+        self.previous_dir = Some(std::mem::replace(&mut self.cwd, target));
+        self.entries.clear();
+        self.snapshot = snapshot;
+        self.filter = state.filter;
+        self.marked = state.marked;
+        self.marked
+            .retain(|path| self.snapshot.iter().any(|entry| &entry.path == path));
+        self.selected = 0;
+        self.scroll = state.scroll;
+        self.rebuild_view();
+        if let Some(path) = state.focused {
+            self.selected = self
+                .entries
+                .iter()
+                .position(|entry| entry.path == path)
+                .unwrap_or(0);
+        }
+        Ok(())
+    }
+
     pub fn enter(&mut self) -> Result<Option<PathBuf>> {
         let Some(entry) = self.current().cloned() else {
             return Ok(None);
         };
-        if entry.is_dir {
-            self.previous_dir = Some(self.cwd.clone());
-            self.cwd = entry.path.canonicalize()?;
-            self.selected = 0;
-            self.scroll = 0;
-            self.refresh()?;
+        if entry.is_dir || (entry.is_symlink && entry.path.is_dir()) {
+            self.navigate(&entry.path)?;
             Ok(None)
         } else {
             Ok(Some(entry.path))
         }
     }
+
     pub fn parent(&mut self) -> Result<()> {
         let old = self.cwd.clone();
-        let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
+        let Some(parent) = old.parent() else {
             return Ok(());
         };
-        self.previous_dir = Some(old.clone());
-        self.cwd = parent;
-        self.selected = 0;
-        self.scroll = 0;
-        self.refresh()?;
-        if let Some(name) = old.file_name() {
+        let restored = self.directories.contains_key(parent);
+        self.navigate(parent)?;
+        if !restored {
             self.selected = self
                 .entries
                 .iter()
-                .position(|e| e.path.file_name() == Some(name))
+                .position(|entry| entry.path == old)
                 .unwrap_or(0);
         }
         Ok(())
     }
+
     pub fn toggle_hidden(&mut self) -> Result<()> {
         self.show_hidden = !self.show_hidden;
-        self.refresh()
+        self.rebuild_view();
+        Ok(())
     }
+
     pub fn cycle_sort(&mut self) -> Result<()> {
         self.sort = self.sort.next();
-        self.refresh()
+        sort_entries(&mut self.snapshot, self.sort);
+        self.rebuild_view();
+        Ok(())
     }
+
     pub fn set_filter(&mut self, filter: String) -> Result<()> {
         self.filter = filter;
-        self.selected = 0;
         self.scroll = 0;
-        self.refresh()
+        self.rebuild_view();
+        Ok(())
     }
+
     pub fn go_home(&mut self) -> Result<()> {
-        let home = option_sdk::home_dir();
-        self.previous_dir = Some(self.cwd.clone());
-        self.cwd = home
-            .canonicalize()
-            .with_context(|| format!("cannot open home {}", home.display()))?;
-        self.selected = 0;
-        self.scroll = 0;
-        self.refresh()
+        self.navigate(&option_sdk::home_dir())
     }
+
     pub fn go_previous(&mut self) -> Result<()> {
-        let Some(previous) = self.previous_dir.take() else {
+        let Some(previous) = self.previous_dir.clone() else {
             self.status = "no previous location".into();
             return Ok(());
         };
-        let current = std::mem::replace(&mut self.cwd, previous);
-        self.previous_dir = Some(current);
-        self.selected = 0;
-        self.scroll = 0;
-        self.refresh()
+        self.navigate(&previous)
     }
+
     pub fn set_clipboard(&mut self, mode: ClipboardMode) {
-        if let Some(entry) = self.current() {
-            let path = entry.path.clone();
-            self.clipboard = Some(Clipboard {
-                path: path.clone(),
-                mode,
-            });
-            let label = match mode {
-                ClipboardMode::Copy => "copied",
-                ClipboardMode::Cut => "cut",
-            };
-            match clipboard_export(&path) {
-                Ok(Some(app)) => self.status = format!("{label} ({app})"),
-                _ => self.status = label.into(),
-            }
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
         }
-    }
-    pub fn paste(&mut self) -> Result<()> {
-        let clip = match self.clipboard.clone() {
-            Some(clip) => Some(clip),
-            None => clipboard_import()
-                .map(|path| Clipboard {
-                    path,
-                    mode: ClipboardMode::Copy,
-                })
-                .map(Some)
-                .unwrap_or(None),
+        let clipboard = Clipboard { paths, mode };
+        let label = if mode == ClipboardMode::Copy {
+            "copied"
+        } else {
+            "cut"
         };
-        let Some(clip) = clip else {
+        let count = clipboard.paths.len();
+        self.status = match clipboard_export(&clipboard) {
+            Ok(Some(helper)) => format!("{label} {count} ({helper})"),
+            _ => format!("{label} {count}"),
+        };
+        self.clipboard = Some(clipboard);
+    }
+
+    pub fn paste(&mut self) -> Result<()> {
+        let Some(clipboard) = clipboard_import().or_else(|| self.clipboard.clone()) else {
             self.status = "clipboard empty".into();
             return Ok(());
         };
-        let name = clip.path.file_name().context("invalid clipboard path")?;
-        let mut target = self.cwd.join(name);
-        if target == clip.path && clip.mode == ClipboardMode::Cut {
-            self.status = "already here".into();
-            return Ok(());
-        }
-        if target.exists() {
-            target = unique_path(&target);
-        }
-        match clip.mode {
-            ClipboardMode::Copy => copy_recursively(&clip.path, &target)?,
-            ClipboardMode::Cut => {
-                fs::rename(&clip.path, &target).or_else(|_| {
-                    copy_recursively(&clip.path, &target)?;
-                    remove_path(&clip.path)
-                })?;
-                self.clipboard = None;
+        let request = TransferRequest {
+            sources: clipboard.paths,
+            destination: self.cwd.clone(),
+            mode: clipboard.mode,
+        };
+        let report = run_transfer(
+            &request,
+            &AtomicBool::new(false),
+            |_| {},
+            |_| ConflictResolution {
+                action: ConflictAction::KeepBoth,
+                apply_to_batch: true,
+            },
+        );
+        self.apply_transfer_report(&request, &report);
+        self.refresh()
+    }
+
+    pub fn apply_transfer_report(&mut self, request: &TransferRequest, report: &TransferReport) {
+        if request.mode == ClipboardMode::Cut {
+            if let Some(clipboard) = self.clipboard.as_mut() {
+                clipboard
+                    .paths
+                    .retain(|path| !report.completed.contains(path));
+                if clipboard.paths.is_empty() {
+                    self.clipboard = None;
+                }
             }
         }
         self.status = format!(
-            "pasted {}",
-            target.file_name().unwrap_or_default().to_string_lossy()
+            "{} transferred · {} skipped · {} failed{}",
+            report.completed.len(),
+            report.skipped.len(),
+            report.errors.len(),
+            if report.cancelled {
+                " · cancelled"
+            } else {
+                ""
+            }
         );
-        self.refresh()
+        if let Some(error) = report.errors.first() {
+            self.status.push_str(&format!(" · {}", error.message));
+        }
     }
     pub fn create_dir(&mut self, name: &str) -> Result<()> {
         validate_entry_name(name)?;
@@ -261,10 +358,26 @@ impl App {
         self.status = format!("renamed to {name}");
         self.refresh()
     }
-    pub fn delete_current(&mut self) -> Result<()> {
-        let entry = self.current().context("nothing selected")?.clone();
-        trash_path(&entry.path)?;
-        self.status = format!("moved {} to trash", entry.name);
+    pub fn delete_selected(&mut self) -> Result<()> {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            bail!("nothing selected");
+        }
+        let mut completed = 0;
+        let mut errors = Vec::new();
+        for path in paths {
+            match trash_path(&path) {
+                Ok(()) => {
+                    self.marked.remove(&path);
+                    completed += 1;
+                }
+                Err(error) => errors.push(format!("{}: {error:#}", path.display())),
+            }
+        }
+        self.status = format!("{completed} moved to trash · {} failed", errors.len());
+        if let Some(error) = errors.first() {
+            self.status.push_str(&format!(" · {error}"));
+        }
         self.refresh()
     }
 }
@@ -274,146 +387,6 @@ pub fn trash_path(path: &Path) -> Result<()> {
         return Ok(());
     }
     trash_dir(path)
-}
-
-/// Push the selected path into the system clipboard so it can be pasted in
-/// other applications. Returns the helper name on success.
-pub fn clipboard_export(path: &Path) -> Result<Option<&'static str>> {
-    if cfg!(target_os = "macos") {
-        return match Command::new("pbcopy")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                child
-                    .stdin
-                    .take()
-                    .unwrap()
-                    .write_all(path.to_string_lossy().as_bytes())?;
-                child.wait()
-            }) {
-            Ok(status) if status.success() => Ok(Some("pbcopy")),
-            _ => Ok(None),
-        };
-    }
-    let attempts: Vec<(&str, Vec<&str>)> = vec![
-        ("wl-copy", vec!["--type", "text/uri-list"]),
-        ("xclip", vec!["-selection", "clipboard"]),
-    ];
-    for (program, args) in attempts {
-        let mut child = match Command::new(program)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => continue,
-        };
-        use std::io::Write;
-        let uri = path_uri(path);
-        let written = child
-            .stdin
-            .take()
-            .map(|mut stdin| stdin.write_all(uri.as_bytes()))
-            .is_some();
-        let success = child.wait().is_ok_and(|s| s.success());
-        if written && success {
-            return Ok(Some(program));
-        }
-    }
-    Ok(None)
-}
-
-/// Read a path from the system clipboard, if a helper is available and the
-/// contents look like a file URI.
-pub fn clipboard_import() -> Option<PathBuf> {
-    for program in ["wl-paste", "xclip"] {
-        let args: &[&str] = if program == "wl-paste" {
-            &["--no-newline"]
-        } else {
-            &["-selection", "clipboard", "-o"]
-        };
-        let Ok(output) = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let text = text.trim().trim_matches('\0');
-        if text.is_empty() {
-            return None;
-        }
-        // file:// URIs, optionally with a trailing newline.
-        let decoded = if let Some(rest) = text.strip_prefix("file://") {
-            let rest = rest.trim_end_matches(['\r', '\n']);
-            percent_decode(rest)
-        } else {
-            text.to_string()
-        };
-        let path = PathBuf::from(decoded);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn path_uri(path: &Path) -> String {
-    let absolute = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    format!(
-        "file://{}",
-        percent_encode(absolute.to_string_lossy().as_bytes())
-    )
-}
-
-fn percent_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Prefer a system trash helper so deletions can be undone outside the app.
@@ -552,7 +525,7 @@ pub fn validate_entry_name(name: &str) -> Result<()> {
 }
 
 pub fn remove_path(path: &Path) -> Result<()> {
-    if path.is_dir() {
+    if path.symlink_metadata()?.is_dir() {
         fs::remove_dir_all(path)?
     } else {
         fs::remove_file(path)?
@@ -570,7 +543,12 @@ pub fn unique_path(path: &Path) -> PathBuf {
             None => format!("{stem} copy {n}"),
         };
         let candidate = parent.join(&name);
-        if !candidate.exists() && !parent.join(format!("{name}.trashinfo")).exists() {
+        if candidate.symlink_metadata().is_err()
+            && parent
+                .join(format!("{name}.trashinfo"))
+                .symlink_metadata()
+                .is_err()
+        {
             return candidate;
         }
     }
@@ -658,8 +636,20 @@ mod tests {
             .iter()
             .position(|e| e.name == "notes.txt")
             .unwrap();
-        app.set_clipboard(ClipboardMode::Copy);
-        app.paste().unwrap();
+        let report = run_transfer(
+            &TransferRequest {
+                sources: app.selected_paths(),
+                destination: root.clone(),
+                mode: ClipboardMode::Copy,
+            },
+            &AtomicBool::new(false),
+            |_| {},
+            |_| ConflictResolution {
+                action: ConflictAction::KeepBoth,
+                apply_to_batch: true,
+            },
+        );
+        assert!(report.errors.is_empty());
         assert!(root.join("notes.txt").exists());
         assert!(root.join("notes copy 1.txt").exists());
         fs::remove_dir_all(root).unwrap();
