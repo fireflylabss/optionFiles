@@ -20,6 +20,61 @@ pub const URI_LIST: &str = "text/uri-list";
 pub const GNOME_COPIED_FILES: &str = "x-special/gnome-copied-files";
 pub const KDE_CUT_SELECTION: &str = "application/x-kde-cutselection";
 
+pub fn clipboard_encode(clipboard: &Clipboard, mime: &str) -> Vec<u8> {
+    if mime == KDE_CUT_SELECTION {
+        return if clipboard.mode == ClipboardMode::Cut {
+            b"1"
+        } else {
+            b"0"
+        }
+        .to_vec();
+    }
+    let mut text = String::new();
+    if mime == GNOME_COPIED_FILES {
+        text.push_str(if clipboard.mode == ClipboardMode::Cut {
+            "cut\n"
+        } else {
+            "copy\n"
+        });
+    }
+    for path in &clipboard.paths {
+        text.push_str(&path_uri(path));
+        text.push_str(if mime == URI_LIST { "\r\n" } else { "\n" });
+    }
+    text.into_bytes()
+}
+
+pub fn clipboard_decode(bytes: &[u8], mime: &str) -> Result<Clipboard> {
+    let text = std::str::from_utf8(bytes)?.trim_matches('\0');
+    let mut lines = text.lines();
+    let mode = if mime == GNOME_COPIED_FILES {
+        match lines.next().map(str::trim) {
+            Some("cut") => ClipboardMode::Cut,
+            Some("copy") => ClipboardMode::Copy,
+            _ => bail!("invalid GNOME file clipboard operation"),
+        }
+    } else if mime == URI_LIST {
+        ClipboardMode::Copy
+    } else {
+        bail!("unsupported file clipboard MIME type");
+    };
+    let mut paths = Vec::new();
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let path = parse_file_uri(line)?;
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        bail!("file clipboard is empty");
+    }
+    Ok(Clipboard { paths, mode })
+}
+
 pub fn path_uri(path: &Path) -> String {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
