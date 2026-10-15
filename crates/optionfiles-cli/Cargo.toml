@@ -20,8 +20,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "color"] }
 crossterm = "0.28"
+libc = "0.2"
+parking_lot = "0.12"
 optionSDK = { workspace = true }
 optionfiles-core = { path = "../optionfiles-core" }
 unicode-width = "0.2"
