@@ -57,6 +57,112 @@ pub struct TransferReport {
     pub cancelled: bool,
 }
 
+pub fn run_transfer(
+    request: &TransferRequest,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(&TransferProgress),
+    mut conflict: impl FnMut(&TransferConflict) -> ConflictResolution,
+) -> TransferReport {
+    let mut report = TransferReport::default();
+    let mut state = TransferProgress {
+        items_total: request.sources.len(),
+        ..TransferProgress::default()
+    };
+    let mut batch_action = None;
+    let selected_directories: Vec<PathBuf> = request
+        .sources
+        .iter()
+        .filter(|path| {
+            path.symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_dir())
+        })
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    progress(&state);
+    for source in &request.sources {
+        if cancel.load(Ordering::Acquire) {
+            report.cancelled = true;
+            break;
+        }
+        let normalized = source
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .zip(source.file_name())
+            .map(|(parent, name)| parent.join(name));
+        if normalized.as_ref().is_some_and(|path| {
+            !seen.insert(path.clone())
+                || selected_directories
+                    .iter()
+                    .any(|directory| path != directory && path.starts_with(directory))
+        }) {
+            report.skipped.push(source.clone());
+            state.items_done += 1;
+            progress(&state);
+            continue;
+        }
+        let mut target = request
+            .destination
+            .join(source.file_name().unwrap_or_default());
+        let result = (|| -> Result<bool> {
+            fs::metadata(&request.destination)
+                .with_context(|| format!("cannot open {}", request.destination.display()))?
+                .is_dir()
+                .then_some(())
+                .context("transfer destination is not a directory")?;
+            validate_target(source, &target)?;
+            if target.symlink_metadata().is_ok() {
+                let action = match batch_action {
+                    Some(action) => action,
+                    None => {
+                        let resolution = conflict(&TransferConflict {
+                            source: source.clone(),
+                            target: target.clone(),
+                        });
+                        if resolution.apply_to_batch {
+                            batch_action = Some(resolution.action);
+                        }
+                        resolution.action
+                    }
+                };
+                match action {
+                    ConflictAction::Skip => return Ok(false),
+                    ConflictAction::KeepBoth => target = unique_path(&target),
+                    ConflictAction::Overwrite => {}
+                }
+            }
+            check_cancel(cancel)?;
+            if request.mode == ClipboardMode::Cut && move_transaction(source, &target, cancel)? {
+                return Ok(true);
+            }
+            copy_transaction(source, &target, cancel, &mut state, &mut progress)?;
+            // Cancellation after publication must not remove a move source.
+            check_cancel(cancel)?;
+            if request.mode == ClipboardMode::Cut {
+                remove_path(source).context("copy completed, but source could not be removed")?;
+            }
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => report.completed.push(source.clone()),
+            Ok(false) => report.skipped.push(source.clone()),
+            Err(error) => {
+                if cancel.load(Ordering::Acquire) {
+                    report.cancelled = true;
+                    break;
+                }
+                report.errors.push(TransferError {
+                    source: source.clone(),
+                    target,
+                    message: format!("{error:#}"),
+                });
+            }
+        }
+        state.items_done += 1;
+        progress(&state);
+    }
+    report
+}
 
 fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     if cancel.load(Ordering::Acquire) {
