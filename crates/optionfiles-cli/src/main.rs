@@ -157,7 +157,7 @@ fn doctor(json: bool) -> Result<()> {
     } else {
         has_binary("xdg-open")
     };
-    let clipboard = has_binary("wl-copy") || has_binary("xclip") || has_binary("pbcopy");
+    let clipboard = has_binary("wl-copy") || has_binary("xclip");
     let trash = has_binary("gio") || has_binary("trash");
     let magick = has_binary("magick") || has_binary("convert");
     if json {
@@ -178,7 +178,7 @@ fn doctor(json: bool) -> Result<()> {
         if opener { "ok" } else { "missing" }
     );
     println!(
-        "  clipboard (wl-copy/xclip/pbcopy): {}",
+        "  clipboard (wl-copy/xclip): {}",
         if clipboard {
             "ok (system)"
         } else {
@@ -190,11 +190,11 @@ fn doctor(json: bool) -> Result<()> {
         if trash { "ok (system)" } else { "fallback XDG" }
     );
     println!(
-        "  magick (previews não-PNG): {}",
+        "  magick (image thumbnails): {}",
         if magick {
             "ok"
         } else {
-            "ausente — só PNG nativo"
+            "missing (image thumbnails unavailable)"
         }
     );
     Ok(())
