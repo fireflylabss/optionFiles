@@ -130,6 +130,57 @@ fn failed_navigation_keeps_active_snapshot_selection_and_location() {
 }
 
 #[test]
+fn local_file_clipboards_roundtrip_all_paths_and_copy_cut_modes() {
+    let paths = vec![
+        PathBuf::from("/tmp/space name.txt"),
+        PathBuf::from("/tmp/ação\nline#%.txt"),
+    ];
+    for mode in [ClipboardMode::Copy, ClipboardMode::Cut] {
+        let clipboard = Clipboard {
+            paths: paths.clone(),
+            mode,
+        };
+        let encoded = clipboard_encode(&clipboard, GNOME_COPIED_FILES);
+        assert_eq!(
+            clipboard_decode(&encoded, GNOME_COPIED_FILES).unwrap(),
+            clipboard
+        );
+        let uri = clipboard_encode(&clipboard, URI_LIST);
+        assert_eq!(clipboard_decode(&uri, URI_LIST).unwrap().paths, paths);
+        assert_eq!(
+            clipboard_decode(&uri, URI_LIST).unwrap().mode,
+            ClipboardMode::Copy
+        );
+    }
+    assert_eq!(
+        parse_file_uri("file://localhost/tmp/a%20b").unwrap(),
+        PathBuf::from("/tmp/a b")
+    );
+    assert!(parse_file_uri("file://remote.example/tmp/a").is_err());
+    assert!(parse_file_uri("https://example.com/a").is_err());
+    assert!(parse_file_uri("file:///tmp/bad%00").is_err());
+    assert!(parse_file_uri("file:///tmp/bad%2").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn file_uri_preserves_non_utf8_and_symlink_identity() {
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+    let sandbox = Sandbox::new();
+    let path = sandbox
+        .0
+        .join(std::ffi::OsString::from_vec(b"non-utf8-\xff".to_vec()));
+    assert_eq!(parse_file_uri(&path_uri(&path)).unwrap(), path);
+    fs::write(sandbox.path("target"), "target contents").unwrap();
+    symlink("target", sandbox.path("link")).unwrap();
+    assert_eq!(
+        parse_file_uri(&path_uri(&sandbox.path("link"))).unwrap(),
+        sandbox.path("link")
+    );
+}
+
+#[test]
 fn missing_initial_path_does_not_silently_open_its_parent() {
     let sandbox = Sandbox::new();
     fs::write(sandbox.path("existing.txt"), "keep").unwrap();
