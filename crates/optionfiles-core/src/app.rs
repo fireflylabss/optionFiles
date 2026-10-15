@@ -40,7 +40,9 @@ pub struct App {
 
 impl App {
     pub fn new(path: &Path, show_hidden: bool) -> Result<Self> {
-        let cwd = if path.is_dir() {
+        let metadata =
+            fs::metadata(path).with_context(|| format!("cannot open {}", path.display()))?;
+        let cwd = if metadata.is_dir() {
             path.canonicalize()?
         } else {
             path.parent().unwrap_or(Path::new(".")).canonicalize()?
