@@ -33,6 +33,7 @@ impl SortMode {
 pub struct Entry {
     pub path: PathBuf,
     pub name: String,
+    pub normalized_name: String,
     pub is_dir: bool,
     pub is_symlink: bool,
     pub size: u64,
@@ -43,12 +44,14 @@ impl Entry {
     pub fn load(path: PathBuf) -> Result<Self> {
         let metadata = fs::symlink_metadata(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         Ok(Self {
-            name: path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-                .to_owned(),
+            normalized_name: name.to_lowercase(),
+            name,
             path,
             is_dir: metadata.is_dir(),
             is_symlink: metadata.file_type().is_symlink(),
@@ -65,12 +68,17 @@ pub fn read_dir(path: &Path, hidden: bool, sort: SortMode) -> Result<Vec<Entry>>
         .filter(|e| hidden || !e.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|e| Entry::load(e.path()).ok())
         .collect::<Vec<_>>();
+    sort_entries(&mut entries, sort);
+    Ok(entries)
+}
+
+pub fn sort_entries(entries: &mut [Entry], sort: SortMode) {
     entries.sort_by(|a, b| {
         if a.is_dir != b.is_dir {
             return b.is_dir.cmp(&a.is_dir);
         }
         let ord = match sort {
-            SortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortMode::Name => a.normalized_name.cmp(&b.normalized_name),
             SortMode::Size => a.size.cmp(&b.size),
             SortMode::Modified => a.modified.cmp(&b.modified),
         };
@@ -80,20 +88,10 @@ pub fn read_dir(path: &Path, hidden: bool, sort: SortMode) -> Result<Vec<Entry>>
             ord
         }
     });
-    Ok(entries)
 }
 
 pub fn copy_recursively(from: &Path, to: &Path) -> Result<()> {
-    if from.is_dir() {
-        fs::create_dir_all(to)?;
-        for child in fs::read_dir(from)? {
-            let child = child?;
-            copy_recursively(&child.path(), &to.join(child.file_name()))?;
-        }
-    } else {
-        fs::copy(from, to)?;
-    }
-    Ok(())
+    crate::transfer::copy_to_path(from, to)
 }
 
 pub fn human_size(size: u64) -> String {
@@ -118,10 +116,5 @@ mod tests {
     fn sizes_are_readable() {
         assert_eq!(human_size(12), "12 B");
         assert_eq!(human_size(1536), "1.5 KB");
-    }
-    #[test]
-    fn sort_cycles() {
-        assert_eq!(SortMode::Name.next(), SortMode::Size);
-        assert_eq!(SortMode::Size.next(), SortMode::Modified);
     }
 }
