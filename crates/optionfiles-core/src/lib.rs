@@ -4,6 +4,7 @@
 //! Keeps the monochrome philosophy: no terminal, CLI or GUI dependencies here.
 
 pub mod app;
+pub mod clipboard;
 pub mod fs;
 pub mod metadata;
 
