@@ -7,6 +7,7 @@ pub mod app;
 pub mod clipboard;
 pub mod fs;
 pub mod metadata;
+pub mod transfer;
 
 pub use app::{
     App, Clipboard, ClipboardMode, clipboard_export, clipboard_import, fuzzy_score, remove_path,
