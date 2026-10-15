@@ -75,6 +75,75 @@ pub fn clipboard_decode(bytes: &[u8], mime: &str) -> Result<Clipboard> {
     Ok(Clipboard { paths, mode })
 }
 
+pub fn clipboard_export(clipboard: &Clipboard) -> Result<Option<&'static str>> {
+    if clipboard.paths.is_empty() {
+        return Ok(None);
+    }
+    let payload = clipboard_encode(clipboard, GNOME_COPIED_FILES);
+    for (program, args) in [
+        ("wl-copy", vec!["--type", GNOME_COPIED_FILES]),
+        (
+            "xclip",
+            vec!["-selection", "clipboard", "-t", GNOME_COPIED_FILES],
+        ),
+    ] {
+        let Ok(mut child) = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        let written = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(&payload).is_ok());
+        let success = child.wait().is_ok_and(|status| status.success());
+        if written && success {
+            return Ok(Some(program));
+        }
+    }
+    Ok(None)
+}
+
+fn read_type(program: &str, mime: &str) -> Option<Vec<u8>> {
+    let args = if program == "wl-paste" {
+        vec!["--no-newline", "--type", mime]
+    } else {
+        vec!["-selection", "clipboard", "-o", "-t", mime]
+    };
+    let output = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+pub fn clipboard_import() -> Option<Clipboard> {
+    for program in ["wl-paste", "xclip"] {
+        for mime in [GNOME_COPIED_FILES, URI_LIST] {
+            let Some(bytes) = read_type(program, mime) else {
+                continue;
+            };
+            let Ok(mut clipboard) = clipboard_decode(&bytes, mime) else {
+                continue;
+            };
+            if mime == URI_LIST
+                && read_type(program, KDE_CUT_SELECTION)
+                    .is_some_and(|bytes| bytes.first() == Some(&b'1'))
+            {
+                clipboard.mode = ClipboardMode::Cut;
+            }
+            return Some(clipboard);
+        }
+    }
+    None
+}
+
 pub fn path_uri(path: &Path) -> String {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
