@@ -58,3 +58,8 @@ See [VERSIONING.md](VERSIONING.md) and blurb in [CHANGELOG.md](CHANGELOG.md). Si
 - Force-push / skip hooks / amend pushed commits
 - Regress the compact B&W minimalist UI without intent
 - Bypass `App::FILES.ensure()` or write outside `~/.option/files` except XDG trash fallback
+
+## GTK verification
+
+- Launch `optionfiles-gtk` with a temporary directory and isolated `OPTION_HOME`; exercise navigation and clipboard operations in the real window. No display-dependent layout test currently exists; a filtered test run matching zero tests is not smoke proof.
+- Exercise `optionfiles-dnd` with real native file drops. A receiver must acknowledge only after the caller finishes copying; cancellation must leave sources intact.
