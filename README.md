@@ -105,6 +105,33 @@ Copies preserve symbolic links instead of copying their targets. Moves on the sa
 
 URI lists preserve encoded spaces and other filename characters. Terminal paste/drop text is a compatibility input path, not a desktop-native drag protocol: arbitrary unquoted spaces and literal newlines cannot reliably distinguish multiple paths from characters inside a filename. Use file URI payloads or native drag and drop for unambiguous bundles.
 
+## Previews
+
+The preview panel shows bounded text, source code, directory contents and metadata. Content detection also handles readable extensionless files. On terminals with Kitty Graphics Protocol support, it can show images and converted document/media previews:
+
+| Content | Optional helper |
+|---|---|
+| PNG, JPEG, GIF, WebP, BMP, TIFF and other image thumbnails | ImageMagick (`magick` or `convert`) |
+| PDF text and first-page image | Poppler (`pdftotext`, `pdftoppm`) |
+| Video metadata and frame | FFmpeg (`ffprobe`, `ffmpeg`) |
+| Audio metadata and cover art when available | FFmpeg (`ffprobe`, `ffmpeg`) |
+| Archive member listing | libarchive (`bsdtar`) |
+
+Press `p` to switch between text and image representations, and `[` / `]` to scroll. Missing helpers are reported in the panel and are not required for browsing. Terminals without graphics support display the available text or metadata. The panel needs sufficient terminal width and can be toggled with Space. Graphics are constrained to the panel and cleared when navigating, opening overlays, resizing or quitting; unchanged frames are cached.
+
+Kitty, Ghostty, WezTerm and optionTerm are detected for graphics. Override detection with:
+
+```bash
+OPTIONFILES_KITTY_GRAPHICS=1 fls   # force enable
+OPTIONFILES_KITTY_GRAPHICS=0 fls   # force disable
+```
+
+Install the optional preview tools on Arch / CachyOS:
+
+```bash
+sudo pacman -S imagemagick ffmpeg poppler libarchive
+```
+
 ## Requirements
 
 - Rust 1.85+ (edition 2024) and the sibling optionSDK checkout for source builds.
